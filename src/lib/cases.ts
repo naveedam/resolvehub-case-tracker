@@ -1,62 +1,75 @@
-// Data access layer.
-//
-// TODO(supabase): once the existing project (eesbjpjwamzmiormzzop) is connected,
-// replace every placeholder read below with the queries noted in each function.
-// All tables are soft-deleted: every query must include `.is("deleted_at", null)`.
+// Data access layer — real Supabase queries.
 import { queryOptions } from "@tanstack/react-query";
-
-import {
-  assets as assetRows,
-  caseParties as casePartyRows,
-  cases as caseRows,
-  dashboardStats as dashboardStatsRow,
-  documents as documentRows,
-  liabilities as liabilityRows,
-  parties as partyRows,
-} from "./placeholder-data";
+import { supabase } from "./supabase";
 import type { CaseDetail, CaseListRow, DashboardStats } from "./types";
 
-const partyById = (id: string | null) =>
-  id ? (partyRows.find((p) => p.id === id && !p.deleted_at) ?? null) : null;
-
-/** supabase.from("cases").select("*, case_parties(role, parties(full_name))").is("deleted_at", null) */
 async function fetchCases(): Promise<CaseListRow[]> {
-  return caseRows
-    .filter((c) => !c.deleted_at)
-    .map((c) => {
-      const link = casePartyRows.find(
-        (cp) => cp.case_id === c.id && cp.role === "Borrower" && !cp.deleted_at,
-      );
-      return { ...c, borrower_name: partyById(link?.party_id ?? null)?.full_name ?? null };
-    });
+  const { data: cases, error } = await supabase
+    .from("cases")
+    .select("*")
+    .is("deleted_at", null);
+  if (error) throw error;
+  if (!cases || cases.length === 0) return [];
+
+  const caseIds = cases.map((c) => c.id);
+  const { data: links, error: linkErr } = await supabase
+    .from("case_parties")
+    .select("case_id, parties(full_name)")
+    .in("case_id", caseIds)
+    .eq("role", "Borrower");
+  if (linkErr) throw linkErr;
+
+  const borrowerByCase = new Map(
+    (links ?? []).map((l: any) => [l.case_id, l.parties?.full_name ?? null]),
+  );
+
+  return cases.map((c) => ({
+    ...c,
+    borrower_name: borrowerByCase.get(c.id) ?? null,
+  }));
 }
 
-/** One case + case_parties/parties, documents, liabilities (+lender), assets. */
 async function fetchCaseDetail(caseId: string): Promise<CaseDetail | null> {
-  const found = caseRows.find((c) => c.id === caseId && !c.deleted_at);
-  if (!found) return null;
+  const { data: caseRow, error: caseErr } = await supabase
+    .from("cases")
+    .select("*")
+    .eq("id", caseId)
+    .is("deleted_at", null)
+    .maybeSingle();
+  if (caseErr) throw caseErr;
+  if (!caseRow) return null;
+
+  const [{ data: parties, error: partiesErr }, { data: documents, error: docsErr },
+         { data: liabilities, error: liabErr }, { data: assets, error: assetsErr }] =
+    await Promise.all([
+      supabase.from("case_parties").select("*, parties(*)").eq("case_id", caseId),
+      supabase.from("documents").select("*").eq("case_id", caseId).is("deleted_at", null),
+      supabase.from("liabilities").select("*, parties(*)").eq("case_id", caseId).is("deleted_at", null),
+      supabase.from("assets").select("*").eq("case_id", caseId).is("deleted_at", null),
+    ]);
+  if (partiesErr) throw partiesErr;
+  if (docsErr) throw docsErr;
+  if (liabErr) throw liabErr;
+  if (assetsErr) throw assetsErr;
+
   return {
-    case: found,
-    parties: casePartyRows
-      .filter((cp) => cp.case_id === caseId && !cp.deleted_at)
-      .map((cp) => ({ ...cp, party: partyById(cp.party_id) })),
-    documents: documentRows.filter((d) => d.case_id === caseId && !d.deleted_at),
-    liabilities: liabilityRows
-      .filter((l) => l.case_id === caseId && !l.deleted_at)
-      .map((l) => ({ ...l, lender: partyById(l.lender_id) })),
-    assets: assetRows.filter((a) => a.case_id === caseId && !a.deleted_at),
+    case: caseRow,
+    parties: (parties ?? []).map((cp: any) => ({ ...cp, party: cp.parties ?? null })),
+    documents: documents ?? [],
+    liabilities: (liabilities ?? []).map((l: any) => ({ ...l, lender: l.parties ?? null })),
+    assets: assets ?? [],
   };
 }
 
-/** supabase.rpc("dashboard_stats").single() */
 async function fetchDashboardStats(): Promise<DashboardStats> {
-  return dashboardStatsRow;
+  const { data, error } = await supabase.rpc("dashboard_stats").single();
+  if (error) throw error;
+  return data as DashboardStats;
 }
 
-/** cases with next_hearing_date in the future, soonest first. */
 async function fetchUpcomingHearings(): Promise<CaseListRow[]> {
-  const now = Date.now();
   const all = await fetchCases();
+  const now = Date.now();
   return all
     .filter((c) => c.next_hearing_date && new Date(c.next_hearing_date).getTime() > now)
     .sort((a, b) => (a.next_hearing_date! < b.next_hearing_date! ? -1 : 1));
@@ -74,6 +87,8 @@ export const dashboardStatsQueryOptions = () =>
 export const upcomingHearingsQueryOptions = () =>
   queryOptions({ queryKey: ["upcoming-hearings"], queryFn: fetchUpcomingHearings });
 
+// Keep your existing formatCurrency/formatDate functions below this line —
+// they don't touch Supabase and didn't need to change.
 export function formatCurrency(value: number | null | undefined) {
   if (value == null) return "—";
   return new Intl.NumberFormat("en-IN", {
@@ -90,4 +105,20 @@ export function formatDate(value: string | null | undefined) {
     month: "short",
     year: "numeric",
   }).format(new Date(value));
+}
+
+export type TicketSize = "small" | "mid" | "large" | "unknown";
+
+export const TICKET_SIZE_LABELS: Record<TicketSize, string> = {
+  small: "Small (≤ ₹10L)",
+  mid: "Mid-market (₹10L – ₹5Cr)",
+  large: "Large corporate (> ₹5Cr)",
+  unknown: "Unclassified",
+};
+
+export function classifyTicketSize(value: number | null | undefined): TicketSize {
+  if (value == null) return "unknown";
+  if (value <= 1_000_000) return "small";
+  if (value <= 50_000_000) return "mid";
+  return "large";
 }

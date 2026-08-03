@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { AlertTriangle, Briefcase, CalendarClock, FolderOpen, IndianRupee } from "lucide-react";
@@ -5,9 +6,13 @@ import { AlertTriangle, Briefcase, CalendarClock, FolderOpen, IndianRupee } from
 import { PageHeader } from "@/components/AppShell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  casesQueryOptions,
+  classifyTicketSize,
   dashboardStatsQueryOptions,
   formatCurrency,
   formatDate,
+  TICKET_SIZE_LABELS,
+  type TicketSize,
   upcomingHearingsQueryOptions,
 } from "@/lib/cases";
 
@@ -30,6 +35,7 @@ export const Route = createFileRoute("/")({
   loader: ({ context }) => {
     context.queryClient.ensureQueryData(dashboardStatsQueryOptions());
     context.queryClient.ensureQueryData(upcomingHearingsQueryOptions());
+    context.queryClient.ensureQueryData(casesQueryOptions());
   },
   component: Dashboard,
   errorComponent: ({ error }) => (
@@ -40,9 +46,12 @@ export const Route = createFileRoute("/")({
   notFoundComponent: () => <p className="text-sm text-muted-foreground">Nothing here.</p>,
 });
 
+const TICKET_SIZE_ORDER: TicketSize[] = ["small", "mid", "large", "unknown"];
+
 function Dashboard() {
   const { data: stats } = useSuspenseQuery(dashboardStatsQueryOptions());
   const { data: hearings } = useSuspenseQuery(upcomingHearingsQueryOptions());
+  const { data: cases } = useSuspenseQuery(casesQueryOptions());
 
   const kpis = [
     { label: "Total cases", value: String(stats.total_cases), icon: FolderOpen },
@@ -55,6 +64,21 @@ function Dashboard() {
       icon: CalendarClock,
     },
   ];
+
+  const ticketBuckets = useMemo(() => {
+    const buckets: Record<TicketSize, { count: number; total: number }> = {
+      small: { count: 0, total: 0 },
+      mid: { count: 0, total: 0 },
+      large: { count: 0, total: 0 },
+      unknown: { count: 0, total: 0 },
+    };
+    for (const c of cases) {
+      const bucket = classifyTicketSize(c.estimated_liability);
+      buckets[bucket].count += 1;
+      buckets[bucket].total += c.estimated_liability ?? 0;
+    }
+    return buckets;
+  }, [cases]);
 
   return (
     <>
@@ -75,6 +99,23 @@ function Dashboard() {
           </Card>
         ))}
       </div>
+
+      <Card className="mt-10">
+        <CardHeader>
+          <CardTitle className="font-serif text-xl">Liability by ticket size</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {TICKET_SIZE_ORDER.map((size) => (
+            <div key={size} className="rounded-lg border border-border p-4">
+              <p className="text-sm font-medium text-muted-foreground">
+                {TICKET_SIZE_LABELS[size]}
+              </p>
+              <p className="mt-1 font-serif text-xl">{formatCurrency(ticketBuckets[size].total)}</p>
+              <p className="text-sm text-muted-foreground">{ticketBuckets[size].count} cases</p>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
 
       <Card className="mt-10">
         <CardHeader>

@@ -1,10 +1,7 @@
-// Auth context.
-//
-// TODO(supabase): once the existing project is connected, back this with
-// supabase.auth.signInWithPassword / signOut / onAuthStateChange + getUser().
-// The public API below is intentionally the shape Supabase Auth will provide.
+// Auth context backed by real Supabase Auth.
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { supabase } from "./supabase";
 
 interface SessionUser {
   email: string;
@@ -17,8 +14,6 @@ interface AuthContextValue {
   signOut: () => Promise<void>;
 }
 
-const STORAGE_KEY = "resolvehub.session";
-
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -26,25 +21,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) setUser(JSON.parse(raw) as SessionUser);
-    } catch {
-      /* ignore malformed session */
-    }
-    setLoading(false);
+    supabase.auth.getUser().then(({ data }) => {
+      setUser(data.user?.email ? { email: data.user.email } : null);
+      setLoading(false);
+    });
+
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user?.email ? { email: session.user.email } : null);
+    });
+
+    return () => subscription.subscription.unsubscribe();
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    if (!email || !password) throw new Error("Email and password are required.");
-    const next = { email };
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    setUser(next);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
   }, []);
 
   const signOut = useCallback(async () => {
-    window.localStorage.removeItem(STORAGE_KEY);
-    setUser(null);
+    await supabase.auth.signOut();
   }, []);
 
   const value = useMemo(

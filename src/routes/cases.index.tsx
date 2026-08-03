@@ -22,7 +22,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { casesQueryOptions, formatCurrency, formatDate } from "@/lib/cases";
+import {
+  casesQueryOptions,
+  classifyTicketSize,
+  formatCurrency,
+  formatDate,
+  TICKET_SIZE_LABELS,
+  type TicketSize,
+} from "@/lib/cases";
 
 export const Route = createFileRoute("/cases/")({
   head: () => ({
@@ -53,12 +60,14 @@ export const Route = createFileRoute("/cases/")({
 });
 
 const ALL = "__all__";
+const TICKET_SIZE_ORDER: TicketSize[] = ["small", "mid", "large", "unknown"];
 
 function CasesPage() {
   const { data: cases } = useSuspenseQuery(casesQueryOptions());
   const [search, setSearch] = useState("");
   const [caseType, setCaseType] = useState<string>(ALL);
   const [status, setStatus] = useState<string>(ALL);
+  const [ticketSize, setTicketSize] = useState<string>(ALL);
   const [sortDesc, setSortDesc] = useState(true);
 
   const caseTypes = useMemo(
@@ -76,6 +85,9 @@ function CasesPage() {
       .filter((c) => (caseType === ALL ? true : c.case_type === caseType))
       .filter((c) => (status === ALL ? true : c.status === status))
       .filter((c) =>
+        ticketSize === ALL ? true : classifyTicketSize(c.estimated_liability) === ticketSize,
+      )
+      .filter((c) =>
         term
           ? c.title.toLowerCase().includes(term) ||
             (c.borrower_name ?? "").toLowerCase().includes(term)
@@ -85,7 +97,7 @@ function CasesPage() {
         const diff = (a.estimated_liability ?? 0) - (b.estimated_liability ?? 0);
         return sortDesc ? -diff : diff;
       });
-  }, [cases, search, caseType, status, sortDesc]);
+  }, [cases, search, caseType, status, ticketSize, sortDesc]);
 
   return (
     <>
@@ -126,6 +138,19 @@ function CasesPage() {
             {statuses.map((s) => (
               <SelectItem key={s} value={s}>
                 {s}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={ticketSize} onValueChange={setTicketSize}>
+          <SelectTrigger className="w-56">
+            <SelectValue placeholder="Ticket size" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>All ticket sizes</SelectItem>
+            {TICKET_SIZE_ORDER.map((size) => (
+              <SelectItem key={size} value={size}>
+                {TICKET_SIZE_LABELS[size]}
               </SelectItem>
             ))}
           </SelectContent>

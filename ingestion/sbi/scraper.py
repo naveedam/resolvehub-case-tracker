@@ -1,0 +1,463 @@
+"""
+ResolveHub — SBI SARFAESI notice scraper (pilot)
+--------------------------------------------------
+Scrapes SBI's public "Sarfaesi And Others" auction notice page, downloads the
+linked sale notice PDFs, extracts key fields, and inserts into the existing
+Supabase schema (cases / documents / liabilities / assets).
+
+This does NOT create or alter any tables — it only inserts rows into tables
+that already exist in your Supabase project (eesbjpjwamzmiormzzop).
+
+Run this from your own infra (a scheduled Vercel/cron job, or manually for
+now) — it needs outbound access to sbi.bank.in, which a sandboxed dev
+environment may not have.
+
+Install:
+    pip install requests beautifulsoup4 pdfplumber supabase python-dateutil --break-system-packages
+
+Env vars required:
+    SUPABASE_URL
+    SUPABASE_SERVICE_ROLE_KEY
+"""
+
+import os
+import re
+import io
+import hashlib
+import requests
+from bs4 import BeautifulSoup
+from dateutil import parser as dateparser
+import pdfplumber
+from supabase import create_client
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BASE_URL = "https://sbi.bank.in/web/sbi-in-the-news/auction-notices/sarfaesi-and-others"
+SOURCE_NAME = "SBI"
+SOURCE_NAME_FULL = "State Bank of India"
+HEADERS = {"User-Agent": "ResolveHub-Research/0.1 (contact: <your-email>)"}
+REQUEST_DELAY_SECONDS = 2  # be polite — don't hammer the bank's site
+
+supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+
+
+def fetch_notice_page(url: str) -> BeautifulSoup:
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    return BeautifulSoup(resp.text, "html.parser")
+
+
+def find_next_page_url(soup: BeautifulSoup) -> str | None:
+    """SBI's Liferay pager renders a 'Next' link — locate it defensively
+    since exact markup/params aren't confirmed yet."""
+    next_link = soup.find("a", string=re.compile(r"^\s*Next\s*$", re.I))
+    if next_link and next_link.get("href"):
+        return requests.compat.urljoin(BASE_URL, next_link["href"])
+    return None
+
+
+def parse_notice_rows(soup: BeautifulSoup) -> list[dict]:
+    """Parse the 'Asset Publisher' table into row dicts."""
+    rows = []
+    table = soup.find("table")
+    if not table:
+        return rows
+
+    for tr in table.find_all("tr")[1:]:  # skip header row
+        cells = tr.find_all("td")
+        if len(cells) < 3:
+            continue
+
+        description = cells[0].get_text(strip=True)
+        auction_date_raw = cells[1].get_text(strip=True)
+        doc_links = [
+            {"label": a.get_text(strip=True), "url": requests.compat.urljoin("https://sbi.bank.in", a["href"])}
+            for a in cells[2].find_all("a", href=True)
+        ]
+
+        try:
+            auction_date = dateparser.parse(auction_date_raw, dayfirst=True).date().isoformat()
+        except (ValueError, TypeError):
+            auction_date = None
+
+        rows.append({
+            "description": description,
+            "auction_date": auction_date,
+            "documents": doc_links,
+        })
+    return rows
+
+
+def download_and_extract_pdf_text(url: str) -> str:
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    text_parts = []
+    with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
+        for page in pdf.pages:
+            text_parts.append(page.extract_text() or "")
+    return "\n".join(text_parts)
+
+
+UNIT_MULTIPLIERS = {
+    "lakh": 100_000, "lakhs": 100_000, "lac": 100_000, "lacs": 100_000,
+    "crore": 10_000_000, "crores": 10_000_000, "cr": 10_000_000, "cr.": 10_000_000,
+}
+
+
+def parse_rupee_amount(match: re.Match | None) -> float | None:
+    """Applies the Lakh/Crore multiplier when the source states the
+    figure that way (e.g. 'Rs 240.00 Lakh') instead of full digits
+    (e.g. 'Rs.2,40,00,000/-'). Missing this was silently shrinking
+    those amounts by 100,000x or 10,000,000x."""
+    if not match:
+        return None
+    raw = match.group(1).replace(",", "")
+    unit = (match.group(2) or "").strip().lower()
+    value = float(raw)
+    return value * UNIT_MULTIPLIERS.get(unit, 1)
+
+
+def extract_fields_from_pdf_text(text: str) -> dict:
+    """Tuned against SBI's actual IBA-style e-auction terms template
+    (numbered sections: 01 Borrower, 02 Branch, 03 Asset Description,
+    04 Encumbrances, 05 Secured Debt...). Other banks may use a similar
+    IBA template, but treat these patterns as a starting point to verify
+    against each new source, not a universal guarantee."""
+
+    def find(pattern, group=1, flags=re.I):
+        m = re.search(pattern, text, flags)
+        return m.group(group).strip() if m else None
+
+    unit_suffix = r"\s*(Lakhs?|Lacs?|Crores?|Cr\.?)?"
+
+    amount = parse_rupee_amount(
+        re.search(rf"0?5\.?\s+The secured.{{0,200}}?Rs\.?\s*([\d,]+(?:\.\d+)?){unit_suffix}", text, re.I | re.S)
+        or re.search(rf"secured debt for.{{0,150}}?Rs\.?\s*([\d,]+(?:\.\d+)?){unit_suffix}", text, re.I | re.S)
+        or re.search(rf"(?:outstanding|due|dues of)[^\d₹]{{0,20}}(?:Rs\.?|₹)\s*([\d,]+(?:\.\d+)?){unit_suffix}", text, re.I)
+        or re.search(rf"total (?:outstanding|dues)[^\n]{{0,40}}(?:Rs\.?|₹)\s*([\d,]+\.?\d*){unit_suffix}", text, re.I)
+    )
+
+    # Sanity floor: real SARFAESI secured debts are essentially never under
+    # ₹1,000. A value below that means the regex grabbed a fragment (e.g.
+    # OCR misread a digit as a letter, truncating the match) — better to
+    # treat it as a failed extraction (falls through to debug review) than
+    # silently store a confidently wrong number.
+    if amount is not None and amount < 1_000:
+        amount = None
+
+    # Property description sits between "...assets to be sold" and the
+    # encumbrances clause — anchor on those phrases directly rather than
+    # exact section numbers (numbering style and spacing varies enough
+    # between branches that "03"/"04" isn't reliable, e.g. "D etails"
+    # with a stray space has been seen in at least one branch's PDF).
+    raw_section_03 = find(
+        r"assets to be sold\.?\s*(.*?)\s*D\s*etails of the encumbrances",
+        flags=re.I | re.S,
+    )
+    property_desc = None
+    if raw_section_03:
+        property_desc = re.sub(r"\s+", " ", raw_section_03).strip() or None
+
+    loan_account = (
+        find(r"(?:loan|account)\s*(?:no\.?|number)[:\s]*([A-Za-z0-9/-]+)") or
+        find(r"Property ID[-:\s]*([A-Za-z0-9]+)")
+    )
+
+    return {
+        "estimated_liability": amount,
+        "loan_account_ref": loan_account,
+        "asset_description": property_desc,
+    }
+
+
+LOAN_TYPE_KEYWORDS = {
+    "Business Loan": ["m/s", "pvt ltd", "pvt. ltd", "enterprise", "industries", "traders",
+                       "ispat", "ceramics", "fuels", "metals", "auto pvt", "solutions pvt"],
+    "Home Loan": ["home loan", "housing loan", "residential flat", "apartment"],
+    "Vehicle Loan": ["vehicle loan", "car loan", "auto loan", "commercial vehicle"],
+    "Gold Loan": ["gold loan", "jewel loan", "jewellery loan"],
+    "Agriculture Loan": ["agriculture loan", "kisan", "crop loan", "agricultural land"],
+    "Education Loan": ["education loan", "student loan"],
+    "Credit Card": ["credit card"],
+    "Trade Credit": ["trade credit", "cash credit", "working capital"],
+}
+
+
+def classify_loan_type(description: str, doc_label: str) -> str:
+    """Matches the DB's fixed loan_type enum. Conservative keyword match
+    on the notice description and document label — defaults to 'Other'
+    when nothing matches rather than guessing a specific category."""
+    lowered = f"{description} {doc_label}".lower()
+    for loan_type, keywords in LOAN_TYPE_KEYWORDS.items():
+        if any(kw in lowered for kw in keywords):
+            return loan_type
+    return "Other"
+
+
+ASSET_TYPE_KEYWORDS = {
+    "Apartment": ["apartment", "flat", "flat no", "residential flat"],
+    "House": ["house", "bungalow", "residential building", "residential property"],
+    "Land": ["land", "plot", "acre", "vacant site", "agricultural land"],
+    "Vehicle": ["vehicle", "car", "truck", "lorry", "motor", "bus"],
+    "Gold": ["gold", "jewellery", "jewelry", "ornament"],
+    "Machinery": ["machinery", "equipment", "plant &", "plant and machinery"],
+    "Inventory": ["inventory", "stock", "goods"],
+    "Business": ["business", "shop", "commercial establishment", "godown"],
+}
+
+
+def classify_asset_type(description: str) -> str:
+    """Matches the DB's fixed asset_type enum. Keyword-based and
+    intentionally conservative — falls back to 'Other' rather than
+    guessing, since the extracted description text is often noisy."""
+    lowered = description.lower()
+    for asset_type, keywords in ASSET_TYPE_KEYWORDS.items():
+        if any(kw in lowered for kw in keywords):
+            return asset_type
+    return "Other"
+
+
+_LENDER_PARTY_CACHE: dict[str, str] = {}
+_BORROWER_PARTY_CACHE: dict[str, str] = {}
+
+COMPANY_KEYWORDS = ["m/s", "pvt ltd", "pvt. ltd", "ltd", "llp", "enterprise", "enterprises",
+                    "industries", "traders", "ispat", "ceramics", "fuels", "metals", "solutions"]
+
+
+def clean_party_name(doc_label: str) -> str:
+    """Doc labels look like '1. M/S GOVINDA INDUSTRIES PVT LTD(396.72 KB)' or
+    '2. SHRI BRAJESH VISHWAKARMA:USP(813.18 KB)' — strip the numbering,
+    file size, and suffix tag to get just the party's name."""
+    name = re.sub(r"^\d+\.\s*", "", doc_label)
+    name = re.sub(r"\([\d.]+\s*[KM]?B\)\s*$", "", name)
+    name = re.sub(r":\s*(USP|SALE NOTICE).*$", "", name, flags=re.I)
+    return name.strip()
+
+
+def classify_party_type(name: str) -> str:
+    """Matches the DB's fixed party_type enum. Defaults to 'Individual'
+    since most SARFAESI borrowers are — flags to 'Company' only on a
+    clear textual signal."""
+    lowered = name.lower()
+    if any(kw in lowered for kw in COMPANY_KEYWORDS):
+        return "Company"
+    return "Individual"
+
+
+def get_or_create_party(full_name: str, party_type: str, cache: dict) -> str:
+    """Dedupes by exact (case-insensitive) name match within a run.
+    Note: this is a same-run cache only — across separate script runs,
+    repeat names will re-query Supabase but should still resolve to the
+    same existing row via the ilike lookup, avoiding duplicates."""
+    key = full_name.lower()
+    if key in cache:
+        return cache[key]
+
+    existing = (
+        supabase.table("parties")
+        .select("id")
+        .ilike("full_name", full_name)
+        .is_("deleted_at", "null")
+        .execute()
+    )
+    if existing.data:
+        party_id = existing.data[0]["id"]
+    else:
+        inserted = supabase.table("parties").insert({
+            "full_name": full_name,
+            "party_type": party_type,
+        }).execute()
+        party_id = inserted.data[0]["id"]
+
+    cache[key] = party_id
+    return party_id
+
+
+def link_case_party(case_id: str, party_id: str, role: str):
+    supabase.table("case_parties").insert({
+        "case_id": case_id,
+        "party_id": party_id,
+        "role": role,
+    }).execute()
+
+
+def classify_document_type(label: str) -> str:
+    """No DB constraint on this column, but keeping it a controlled
+    vocabulary anyway for consistency across sources."""
+    lowered = label.lower()
+    if "sale notice" in lowered:
+        return "sale_notice"
+    if "usp" in lowered:
+        return "property_fact_sheet"
+    return "terms_and_conditions"
+
+
+def make_case_reference(description: str, auction_date: str | None, borrower_name: str) -> str:
+    """Stable dedup key so re-running the scraper doesn't create duplicate
+    cases. Keyed on borrower identity (not a single doc URL) since one
+    case can now have multiple attached documents."""
+    raw = f"{SOURCE_NAME}|{description}|{auction_date}|{borrower_name.lower()}"
+    return "SBI-" + hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def case_exists(case_reference: str) -> bool:
+    result = (
+        supabase.table("cases")
+        .select("id")
+        .eq("case_reference", case_reference)
+        .is_("deleted_at", "null")
+        .execute()
+    )
+    return len(result.data) > 0
+
+
+def group_documents_by_borrower(documents: list[dict]) -> dict[str, list[dict]]:
+    """A single notice row can cover multiple distinct people, and each
+    person can have multiple PDFs (Terms & Conditions, Sale Notice, USP
+    fact sheet). Group by cleaned name so all of one person's documents
+    land on one case instead of being split into separate cases."""
+    groups: dict[str, list[dict]] = {}
+    for doc in documents:
+        name = clean_party_name(doc["label"])
+        groups.setdefault(name, []).append(doc)
+    return groups
+
+
+def ingest_notice(row: dict) -> tuple[int, int]:
+    ingested_count = 0
+    skipped_count = 0
+
+    for borrower_name, docs in group_documents_by_borrower(row["documents"]).items():
+        if not borrower_name:
+            continue  # couldn't extract a usable name — skip rather than create an unlabeled case
+
+        case_reference = make_case_reference(row["description"], row["auction_date"], borrower_name)
+        if case_exists(case_reference):
+            skipped_count += 1
+            continue  # already ingested, skip
+
+        # Fetch + extract every doc for this borrower, merging fields —
+        # e.g. the T&C doc usually has the amount, the USP doc usually
+        # has a cleaner property description. First non-empty value wins.
+        merged_fields: dict = {}
+        pdf_texts: dict[str, str] = {}
+        for doc in docs:
+            try:
+                text = download_and_extract_pdf_text(doc["url"])
+            except Exception as e:
+                print(f"  ! failed to fetch/parse PDF {doc['url']}: {e}")
+                text = ""
+            pdf_texts[doc["url"]] = text
+            if text:
+                extracted = extract_fields_from_pdf_text(text)
+                for k, v in extracted.items():
+                    if v and not merged_fields.get(k):
+                        merged_fields[k] = v
+
+        # Only dump for debugging if NONE of this borrower's docs yielded
+        # a liability amount — avoids false "failures" when one doc in
+        # the group (e.g. the USP fact sheet) legitimately has no figure.
+        if not merged_fields.get("estimated_liability"):
+            os.makedirs("debug_pdf_text", exist_ok=True)
+            for i, (url, text) in enumerate(pdf_texts.items()):
+                if text:
+                    with open(f"debug_pdf_text/{case_reference}_{i}.txt", "w", encoding="utf-8") as f:
+                        f.write(text)
+
+        case_row = {
+            "case_reference": case_reference,
+            "title": borrower_name,
+            "case_type": "SARFAESI",
+            "status": "active",
+            "court_name": None,  # SARFAESI is out-of-court; leave null or store DRT if appeal exists
+            "next_hearing_date": None,
+            "filing_date": row["auction_date"],  # closest available date; adjust if you find a better one
+            "estimated_liability": merged_fields.get("estimated_liability"),
+            "summary": row["description"],
+            "metadata": {
+                "source": SOURCE_NAME,
+                "source_urls": [d["url"] for d in docs],
+                "loan_account_ref": merged_fields.get("loan_account_ref"),
+            },
+        }
+
+        inserted_case = supabase.table("cases").insert(case_row).select().execute()
+        case_id = inserted_case.data[0]["id"]
+
+        # --- Parties: lender (cached across the whole run) and borrower ---
+        lender_id = get_or_create_party(SOURCE_NAME_FULL, "Bank", _LENDER_PARTY_CACHE)
+        link_case_party(case_id, lender_id, "Lender")
+
+        borrower_type = classify_party_type(borrower_name)
+        borrower_id = get_or_create_party(borrower_name, borrower_type, _BORROWER_PARTY_CACHE)
+        link_case_party(case_id, borrower_id, "Borrower")
+
+        # --- Documents: attach ALL of this borrower's PDFs to the one case ---
+        for doc in docs:
+            supabase.table("documents").insert({
+                "case_id": case_id,
+                "document_type": classify_document_type(doc["label"]),
+                "document_name": doc["label"],
+                "storage_path": doc["url"],  # storing source URL for now; swap for Supabase Storage path if you mirror the PDF
+                "processed": bool(pdf_texts.get(doc["url"])),
+                "metadata": {"source": SOURCE_NAME},
+            }).execute()
+
+        if merged_fields.get("estimated_liability"):
+            supabase.table("liabilities").insert({
+                "case_id": case_id,
+                "lender_id": lender_id,
+                "loan_type": classify_loan_type(row["description"], borrower_name),
+                "account_number": merged_fields.get("loan_account_ref"),
+                "outstanding_amount": merged_fields["estimated_liability"],
+                "currency_code": "INR",
+                "secured": True,
+                "remarks": f"Auto-ingested from {SOURCE_NAME} sale notice; verify against source PDF.",
+            }).execute()
+
+        if merged_fields.get("asset_description"):
+            supabase.table("assets").insert({
+                "case_id": case_id,
+                "asset_type": classify_asset_type(merged_fields["asset_description"]),
+                "description": merged_fields["asset_description"],
+                "auction_date": row["auction_date"],
+                "auction_status": "scheduled",
+            }).execute()
+
+        print(f"  + ingested case {case_reference} ({borrower_name}, {len(docs)} docs)")
+        ingested_count += 1
+
+    return ingested_count, skipped_count
+
+
+def run(max_pages: int | None = 1):
+    """max_pages=1 for the pilot run. Bump this once you've verified the
+    pagination detection works and you're happy with data quality."""
+    url = BASE_URL
+    page_num = 1
+    total_ingested = 0
+    total_skipped = 0
+
+    while url:
+        print(f"Fetching page {page_num}: {url}")
+        soup = fetch_notice_page(url)
+        rows = parse_notice_rows(soup)
+        print(f"  found {len(rows)} notices")
+
+        for row in rows:
+            ingested, skipped = ingest_notice(row)
+            total_ingested += ingested
+            total_skipped += skipped
+
+        if max_pages and page_num >= max_pages:
+            break
+
+        url = find_next_page_url(soup)
+        page_num += 1
+
+    print(f"\nDone. Ingested: {total_ingested}, skipped (already existed): {total_skipped}")
+
+
+if __name__ == "__main__":
+    run(max_pages=1)

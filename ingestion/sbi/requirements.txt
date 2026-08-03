@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+pdfplumber
+python-dateutil
+supabase
+python-dotenv
