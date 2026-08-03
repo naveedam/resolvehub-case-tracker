@@ -13,6 +13,7 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { AppShell } from "../components/AppShell";
+import { LoginScreen } from "../components/LoginScreen";
 
 function NotFoundComponent() {
   return (
