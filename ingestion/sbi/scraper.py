@@ -23,6 +23,7 @@ Env vars required:
 import os
 import re
 import io
+import time
 import hashlib
 import requests
 from bs4 import BeautifulSoup
@@ -42,19 +43,30 @@ REQUEST_DELAY_SECONDS = 2  # be polite — don't hammer the bank's site
 supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
 
 
-def fetch_notice_page(url: str) -> BeautifulSoup:
+def fetch_notice_page(url: str) -> tuple[BeautifulSoup, str]:
     resp = requests.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
-    return BeautifulSoup(resp.text, "html.parser")
+    return BeautifulSoup(resp.text, "html.parser"), resp.text
 
 
-def find_next_page_url(soup: BeautifulSoup) -> str | None:
-    """SBI's Liferay pager renders a 'Next' link — locate it defensively
-    since exact markup/params aren't confirmed yet."""
-    next_link = soup.find("a", string=re.compile(r"^\s*Next\s*$", re.I))
-    if next_link and next_link.get("href"):
-        return requests.compat.urljoin(BASE_URL, next_link["href"])
-    return None
+def extract_portlet_instance_id(html: str) -> str | None:
+    """SBI's notice table is rendered by a Liferay Asset Publisher portlet
+    with a page-specific instance ID baked into its layout. Pagination
+    requires this exact ID in every query param name — a plain 'Next'
+    link doesn't exist; the site paginates via portlet AJAX requests."""
+    m = re.search(
+        r"com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_([A-Za-z0-9]+)",
+        html,
+    )
+    return m.group(1) if m else None
+
+
+def build_page_url(instance_id: str, page_num: int, delta: int = 200) -> str:
+    portlet_id = f"com_liferay_asset_publisher_web_portlet_AssetPublisherPortlet_INSTANCE_{instance_id}"
+    return (
+        f"{BASE_URL}?p_p_id={portlet_id}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view"
+        f"&_{portlet_id}_delta={delta}&p_r_p_resetCur=false&_{portlet_id}_cur={page_num}"
+    )
 
 
 def parse_notice_rows(soup: BeautifulSoup) -> list[dict]:
@@ -90,6 +102,7 @@ def parse_notice_rows(soup: BeautifulSoup) -> list[dict]:
 
 
 def download_and_extract_pdf_text(url: str) -> str:
+    time.sleep(REQUEST_DELAY_SECONDS)
     resp = requests.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     text_parts = []
@@ -109,13 +122,25 @@ def parse_rupee_amount(match: re.Match | None) -> float | None:
     """Applies the Lakh/Crore multiplier when the source states the
     figure that way (e.g. 'Rs 240.00 Lakh') instead of full digits
     (e.g. 'Rs.2,40,00,000/-'). Missing this was silently shrinking
-    those amounts by 100,000x or 10,000,000x."""
+    those amounts by 100,000x or 10,000,000x.
+
+    Safety check: only apply the multiplier if the raw number is small
+    (< 1 lakh as a bare figure) — a genuine 'X Lakh'/'X Crore' phrasing
+    always has a small X (e.g. '240 Lakh', '52.88 Crore'). Some source
+    documents redundantly/mistakenly append a unit word AFTER an
+    already-complete full-digit figure (e.g. 'Rs. 52,88,42,189.84
+    Crore' when 52,88,42,189.84 is already the full rupee amount) —
+    applying the multiplier there would inflate an already-correct
+    number by another 10,000,000x."""
     if not match:
         return None
     raw = match.group(1).replace(",", "")
     unit = (match.group(2) or "").strip().lower()
     value = float(raw)
-    return value * UNIT_MULTIPLIERS.get(unit, 1)
+    multiplier = UNIT_MULTIPLIERS.get(unit, 1)
+    if multiplier > 1 and value >= 100_000:
+        return value
+    return value * multiplier
 
 
 def extract_fields_from_pdf_text(text: str) -> dict:
@@ -138,12 +163,12 @@ def extract_fields_from_pdf_text(text: str) -> dict:
         or re.search(rf"total (?:outstanding|dues)[^\n]{{0,40}}(?:Rs\.?|₹)\s*([\d,]+\.?\d*){unit_suffix}", text, re.I)
     )
 
-    # Sanity floor: real SARFAESI secured debts are essentially never under
-    # ₹1,000. A value below that means the regex grabbed a fragment (e.g.
-    # OCR misread a digit as a letter, truncating the match) — better to
-    # treat it as a failed extraction (falls through to debug review) than
-    # silently store a confidently wrong number.
-    if amount is not None and amount < 1_000:
+    # Sanity bounds: real SARFAESI secured debts are essentially never
+    # under ₹1,000 (extraction grabbed a fragment) or over ₹10,000 crore
+    # (extraction bug or a source drafting error) — treat either as a
+    # failed extraction (falls through to debug review) rather than
+    # silently storing a confidently wrong number.
+    if amount is not None and (amount < 1_000 or amount > 100_000_000_000):
         amount = None
 
     # Property description sits between "...assets to be sold" and the
@@ -226,12 +251,20 @@ COMPANY_KEYWORDS = ["m/s", "pvt ltd", "pvt. ltd", "ltd", "llp", "enterprise", "e
 
 
 def clean_party_name(doc_label: str) -> str:
-    """Doc labels look like '1. M/S GOVINDA INDUSTRIES PVT LTD(396.72 KB)' or
-    '2. SHRI BRAJESH VISHWAKARMA:USP(813.18 KB)' — strip the numbering,
-    file size, and suffix tag to get just the party's name."""
+    """Doc labels look like '1. M/S GOVINDA INDUSTRIES PVT LTD(396.72 KB)',
+    '2. SHRI BRAJESH VISHWAKARMA:USP(813.18 KB)', or (seen on later pages)
+    'DIPANKAR BORTHAKUR-T&C' / 'DIPANKAR BORTHAKUR-SALE NOTICE' — SBI uses
+    both colon and dash as the document-type suffix separator depending
+    on the branch/batch. Strip numbering, file size, and EITHER suffix
+    style to get just the party's name."""
     name = re.sub(r"^\d+\.\s*", "", doc_label)
     name = re.sub(r"\([\d.]+\s*[KM]?B\)\s*$", "", name)
-    name = re.sub(r":\s*(USP|SALE NOTICE).*$", "", name, flags=re.I)
+    name = re.sub(
+        r"[:\-]\s*(USP|SALE\s*NOTICE|T\s*&\s*C|TERMS?\s*(AND|&)\s*CONDITIONS?)\s*.*$",
+        "",
+        name,
+        flags=re.I,
+    )
     return name.strip()
 
 
@@ -431,33 +464,60 @@ def ingest_notice(row: dict) -> tuple[int, int]:
     return ingested_count, skipped_count
 
 
-def run(max_pages: int | None = 1):
-    """max_pages=1 for the pilot run. Bump this once you've verified the
-    pagination detection works and you're happy with data quality."""
-    url = BASE_URL
-    page_num = 1
+def run(max_pages: int | None = None):
+    """max_pages=None scrapes until a page returns zero notices (the real
+    end of the list) rather than a hardcoded page count, since SBI's total
+    page count can drift over time as new notices are published."""
     total_ingested = 0
     total_skipped = 0
 
-    while url:
-        print(f"Fetching page {page_num}: {url}")
-        soup = fetch_notice_page(url)
+    print(f"Fetching page 1: {BASE_URL}")
+    soup, html = fetch_notice_page(BASE_URL)
+    instance_id = extract_portlet_instance_id(html)
+    if not instance_id:
+        print("  ! could not find the Liferay portlet instance ID — "
+              "SBI may have changed their page layout. Falling back to page 1 only.")
         rows = parse_notice_rows(soup)
         print(f"  found {len(rows)} notices")
+        for row in rows:
+            ingested, skipped = ingest_notice(row)
+            total_ingested += ingested
+            total_skipped += skipped
+        print(f"\nDone. Ingested: {total_ingested}, skipped (already existed): {total_skipped}")
+        return
+
+    print(f"  found portlet instance id: {instance_id}")
+    rows = parse_notice_rows(soup)
+    print(f"  found {len(rows)} notices")
+    for row in rows:
+        ingested, skipped = ingest_notice(row)
+        total_ingested += ingested
+        total_skipped += skipped
+
+    page_num = 2
+    while True:
+        if max_pages and page_num > max_pages:
+            break
+
+        url = build_page_url(instance_id, page_num)
+        print(f"Fetching page {page_num}: {url}")
+        soup, _ = fetch_notice_page(url)
+        rows = parse_notice_rows(soup)
+        print(f"  found {len(rows)} notices")
+
+        if not rows:
+            print("  (empty page — reached the end of the list)")
+            break
 
         for row in rows:
             ingested, skipped = ingest_notice(row)
             total_ingested += ingested
             total_skipped += skipped
 
-        if max_pages and page_num >= max_pages:
-            break
-
-        url = find_next_page_url(soup)
         page_num += 1
 
     print(f"\nDone. Ingested: {total_ingested}, skipped (already existed): {total_skipped}")
 
 
 if __name__ == "__main__":
-    run(max_pages=1)
+    run()

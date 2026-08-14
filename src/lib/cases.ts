@@ -11,11 +11,9 @@ async function fetchCases(): Promise<CaseListRow[]> {
   if (error) throw error;
   if (!cases || cases.length === 0) return [];
 
-  const caseIds = cases.map((c) => c.id);
   const { data: links, error: linkErr } = await supabase
     .from("case_parties")
     .select("case_id, parties(full_name)")
-    .in("case_id", caseIds)
     .eq("role", "Borrower");
   if (linkErr) throw linkErr;
 
