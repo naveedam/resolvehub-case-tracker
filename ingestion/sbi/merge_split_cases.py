@@ -169,6 +169,82 @@ def repair_titles_from_documents(dry_run: bool = True):
     print(f"Repaired {len(mismatches)} case titles.")
 
 
+def build_exact_liability_groups(cases: list[dict]) -> dict[tuple, list[dict]]:
+    """Groups by (title, estimated_liability) exactly. Two cases with the
+    identical dollar-for-dollar liability figure are effectively certain
+    to be the same real case, re-ingested across different scrape
+    sessions where the underlying description/date text drifted slightly
+    (SBI's page 1 content isn't a stable snapshot - it can shift between
+    runs). This catches duplication the suffix/title-based grouping
+    missed, including near-identical name typos across sessions."""
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for c in cases:
+        if c.get("estimated_liability") is None:
+            continue  # no reliable second key to group on for null-liability cases
+        key = (c["title"].strip().upper(), round(c["estimated_liability"], 2))
+        groups[key].append(c)
+    return {k: v for k, v in groups.items() if len(v) > 1}
+
+
+def merge_group_list(merge_groups: dict, dry_run: bool) -> int:
+    """Shared merge machinery - same logic as run()'s merge loop, reused
+    here for the exact-liability grouping."""
+    if dry_run:
+        for key, group in list(merge_groups.items())[:20]:
+            name, amount = key
+            print(f"  MERGE ({len(group)} cases) -> '{name}' (Rs.{amount:,.2f})")
+        if len(merge_groups) > 20:
+            print(f"  ...and {len(merge_groups) - 20} more groups")
+        return sum(len(v) - 1 for v in merge_groups.values())
+
+    merged_count = 0
+    for key, group in merge_groups.items():
+        group.sort(key=lambda c: (c.get("estimated_liability") is None, c["created_at"]))
+        canonical = group[0]
+        duplicates = group[1:]
+        canonical_id = canonical["id"]
+
+        for dup in duplicates:
+            dup_id = dup["id"]
+            supabase.table("documents").update({"case_id": canonical_id}).eq("case_id", dup_id).execute()
+            supabase.table("assets").update({"case_id": canonical_id}).eq("case_id", dup_id).execute()
+
+            canon_liabs = supabase.table("liabilities").select("id").eq("case_id", canonical_id).execute().data
+            if not canon_liabs:
+                supabase.table("liabilities").update({"case_id": canonical_id}).eq("case_id", dup_id).execute()
+            else:
+                supabase.table("liabilities").delete().eq("case_id", dup_id).execute()
+
+            supabase.table("case_parties").delete().eq("case_id", dup_id).execute()
+            supabase.table("cases").delete().eq("id", dup_id).execute()
+
+        merged_count += 1
+        if merged_count % 50 == 0:
+            print(f"  merged {merged_count}/{len(merge_groups)} groups...")
+
+    return merged_count
+
+
+def run_exact_liability_merge(dry_run: bool = True):
+    print("Fetching all SBI cases...")
+    cases = fetch_all_sbi_cases()
+    print(f"  {len(cases)} total SBI cases")
+
+    merge_groups = build_exact_liability_groups(cases)
+    total_dupes = sum(len(v) - 1 for v in merge_groups.values())
+    print(f"Found {len(merge_groups)} exact-liability duplicate groups, "
+          f"removing {total_dupes} duplicate case rows\n")
+
+    if dry_run:
+        print("--- DRY RUN: no changes will be made ---\n")
+        merge_group_list(merge_groups, dry_run=True)
+        print("\nRun with dry_run=False to actually apply these merges.")
+        return
+
+    merged_count = merge_group_list(merge_groups, dry_run=False)
+    print(f"\nDone. Merged {merged_count} groups, removed {total_dupes} duplicate case rows.")
+
+
 def run(dry_run: bool = True):
     print("Fetching all SBI cases..." )
     cases = fetch_all_sbi_cases()
