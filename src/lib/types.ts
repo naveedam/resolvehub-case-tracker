@@ -141,3 +141,60 @@ export interface CaseDetail {
   liabilities: LiabilityWithLender[];
   assets: Asset[];
 }
+
+// --- Phase 1 Resolution Profile layer (additive tables — see
+// db/migrations/0001_resolution_profile_phase1.up.sql) ---
+
+export type ObservationEntityType = "case" | "liability" | "asset" | "party";
+export type Confidence = "verified" | "source_derived" | "inferred";
+
+export interface Source {
+  id: string;
+  name: string;
+  full_name: string;
+  source_type: string;
+}
+
+export interface FieldObservation {
+  id: string;
+  entity_type: ObservationEntityType;
+  entity_id: string;
+  field_name: string;
+  value_numeric: number | null;
+  value_text: string | null;
+  value_date: string | null;
+  value_jsonb: unknown | null;
+  unit: string | null;
+  source_id: string;
+  published_at: string | null;
+  retrieved_at: string;
+  confidence: Confidence;
+  is_current: boolean;
+  superseded_by: string | null;
+}
+
+export interface CaseEvent {
+  id: string;
+  case_id: string;
+  event_type: string;
+  event_date: string | null;
+  description: string | null;
+  source_id: string | null;
+}
+
+export interface EntityIdentifier {
+  id: string;
+  entity_type: "case" | "party";
+  entity_id: string;
+  identifier_type: string;
+  identifier_value: string;
+  source_id: string;
+  match_method: "deterministic" | "fuzzy";
+}
+
+export interface ResolutionProfile {
+  observations: FieldObservation[];
+  sourcesById: Record<string, Source>;
+  events: CaseEvent[];
+  identifiers: EntityIdentifier[];
+}

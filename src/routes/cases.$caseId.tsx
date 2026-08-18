@@ -3,6 +3,7 @@ import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 
 import { PageHeader } from "@/components/AppShell";
+import { ResolutionProfilePanel } from "@/components/ResolutionProfilePanel";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -15,6 +16,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { caseDetailQueryOptions, formatCurrency, formatDate } from "@/lib/cases";
+import { resolutionProfileQueryOptions } from "@/lib/resolution-profile";
 import { CASE_PARTY_ROLES } from "@/lib/types";
 
 export const Route = createFileRoute("/cases/$caseId")({
@@ -34,10 +36,14 @@ export const Route = createFileRoute("/cases/$caseId")({
     ],
   }),
   loader: async ({ context, params }) => {
-    const detail = await context.queryClient.ensureQueryData(
-      caseDetailQueryOptions(params.caseId),
-    );
+    const detail = await context.queryClient.ensureQueryData(caseDetailQueryOptions(params.caseId));
     if (!detail) throw notFound();
+    // Best-effort: the Resolution Profile panel renders nothing if these
+    // (additive, Phase 1) tables have no rows for this case, so a failure
+    // here shouldn't block the rest of an otherwise-working case page.
+    await context.queryClient
+      .ensureQueryData(resolutionProfileQueryOptions(detail))
+      .catch(() => undefined);
   },
   component: CaseDetailPage,
   errorComponent: ({ error }) => (
@@ -227,6 +233,8 @@ function CaseDetailPage() {
           </Table>
         </CardContent>
       </Card>
+
+      <ResolutionProfilePanel caseDetail={data} />
     </>
   );
 }
