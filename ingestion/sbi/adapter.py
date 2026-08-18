@@ -79,6 +79,15 @@ class SBIAdapter:
         borrower_type = scraper.classify_party_type(borrower_name)
         observations: list[FieldObservation] = []
 
+        # NOTE: SBI's notice page only ever gives us an auction date, never
+        # an actual publication date for the notice/PDF — parse_notice_rows
+        # doesn't extract one because the source doesn't expose one. Using
+        # auction_date as published_at was wrong: it's the date the sale is
+        # scheduled FOR, not the date this information was published. Every
+        # observation below leaves published_at unset (None) unless a real
+        # publication date becomes available from a future source. The
+        # auction_date FIELD itself still correctly carries auction_date as
+        # its *value* — that part was never wrong.
         if merged_fields.get("estimated_liability"):
             amount = merged_fields["estimated_liability"]
             amount_source_url = merged_sources.get("estimated_liability")
@@ -86,21 +95,21 @@ class SBIAdapter:
                 FieldObservation(
                     entity_type="case", field_name="estimated_liability",
                     value_numeric=amount, unit="INR",
-                    source_document_url=amount_source_url, published_at=auction_date,
+                    source_document_url=amount_source_url,
                 )
             )
             observations.append(
                 FieldObservation(
                     entity_type="liability", field_name="outstanding_amount",
                     value_numeric=amount, unit="INR",
-                    source_document_url=amount_source_url, published_at=auction_date,
+                    source_document_url=amount_source_url,
                 )
             )
             observations.append(
                 FieldObservation(
                     entity_type="liability", field_name="loan_type",
                     value_text=scraper.classify_loan_type(row["description"], borrower_name),
-                    published_at=auction_date, confidence="inferred",
+                    confidence="inferred",
                 )
             )
 
@@ -109,7 +118,7 @@ class SBIAdapter:
                 FieldObservation(
                     entity_type="liability", field_name="account_number",
                     value_text=merged_fields["loan_account_ref"],
-                    source_document_url=merged_sources.get("loan_account_ref"), published_at=auction_date,
+                    source_document_url=merged_sources.get("loan_account_ref"),
                 )
             )
 
@@ -120,20 +129,20 @@ class SBIAdapter:
                 FieldObservation(
                     entity_type="asset", field_name="description",
                     value_text=merged_fields["asset_description"],
-                    source_document_url=merged_sources.get("asset_description"), published_at=auction_date,
+                    source_document_url=merged_sources.get("asset_description"),
                 )
             )
             if auction_date:
                 observations.append(
                     FieldObservation(
                         entity_type="asset", field_name="auction_date",
-                        value_date=auction_date, published_at=auction_date,
+                        value_date=auction_date,
                     )
                 )
             observations.append(
                 FieldObservation(
                     entity_type="asset", field_name="auction_status",
-                    value_text="scheduled", published_at=auction_date, confidence="inferred",
+                    value_text="scheduled", confidence="inferred",
                 )
             )
 
