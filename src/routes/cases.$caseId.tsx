@@ -38,12 +38,15 @@ export const Route = createFileRoute("/cases/$caseId")({
   loader: async ({ context, params }) => {
     const detail = await context.queryClient.ensureQueryData(caseDetailQueryOptions(params.caseId));
     if (!detail) throw notFound();
-    // Best-effort: the Resolution Profile panel renders nothing if these
-    // (additive, Phase 1) tables have no rows for this case, so a failure
-    // here shouldn't block the rest of an otherwise-working case page.
+    // Best-effort prefetch: a failure here must not block the rest of an
+    // otherwise-working case page, but it must not vanish silently either
+    // — log it so a real backend error (permissions, etc.) is visible in
+    // server logs instead of looking identical to "no data yet".
     await context.queryClient
       .ensureQueryData(resolutionProfileQueryOptions(detail))
-      .catch(() => undefined);
+      .catch((error) => {
+        console.error("[cases.$caseId loader] Resolution Profile prefetch failed:", error);
+      });
   },
   component: CaseDetailPage,
   errorComponent: ({ error }) => (
