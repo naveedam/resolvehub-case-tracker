@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,12 +43,32 @@ const CONFIDENCE_TONE: Record<FieldObservation["confidence"], string> = {
   inferred: "bg-warning/15 text-warning-foreground border-warning/40",
 };
 
-/** Renders nothing if the Phase 1 evidence tables have no rows for this
- * case yet (e.g. the case predates this migration and hasn't been
- * re-ingested) — this is additive UI, not a replacement for the
- * existing case detail sections above it. */
+/** Renders nothing if the Phase 1 evidence tables genuinely have no rows
+ * for this case yet (e.g. it hasn't been re-ingested) — this is additive
+ * UI, not a replacement for the existing case detail sections above it.
+ *
+ * Deliberately NOT a suspense query: a Resolution Profile fetch failure
+ * (permissions, network, anything) must never take down the rest of an
+ * otherwise-working case page, and "no data" and "the query failed" are
+ * different situations that need to be visibly different — silently
+ * treating both as "render nothing" is what made this hard to diagnose
+ * in the first place. */
 export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail }) {
-  const { data } = useSuspenseQuery(resolutionProfileQueryOptions(caseDetail));
+  const { data, error, isLoading } = useQuery(resolutionProfileQueryOptions(caseDetail));
+
+  if (error) {
+    console.error("[ResolutionProfilePanel] failed to load evidence data:", error);
+    return (
+      <Card className="mt-8 border-warning/40 bg-warning/5">
+        <CardContent className="py-4 text-sm text-muted-foreground">
+          Resolution profile is temporarily unavailable. (Check the browser console for details.)
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (isLoading || !data) return null;
+
   const { observations, sourcesById, events, identifiers } = data;
 
   if (observations.length === 0 && events.length === 0 && identifiers.length === 0) {
