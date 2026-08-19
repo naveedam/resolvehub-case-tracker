@@ -90,7 +90,8 @@ function CasesPage() {
       .filter((c) =>
         term
           ? c.title.toLowerCase().includes(term) ||
-            (c.borrower_name ?? "").toLowerCase().includes(term)
+            (c.borrower_name ?? "").toLowerCase().includes(term) ||
+            c.case_reference.toLowerCase().includes(term)
           : true,
       )
       .sort((a, b) => {
@@ -112,7 +113,7 @@ function CasesPage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by case title or borrower name"
+            placeholder="Search by case title, borrower name or case reference"
             className="pl-9"
           />
         </div>

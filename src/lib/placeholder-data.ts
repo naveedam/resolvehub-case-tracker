@@ -23,6 +23,7 @@ export const parties: Party[] = [
 export const cases: Case[] = [
   {
     id: "c1",
+    case_reference: "PLACEHOLDER-C1",
     title: "SBI v. Ramesh Kumar — SARFAESI recovery",
     case_type: "SARFAESI",
     status: "Active",
@@ -36,6 +37,7 @@ export const cases: Case[] = [
   },
   {
     id: "c2",
+    case_reference: "PLACEHOLDER-C2",
     title: "In re: Anita Desai — Personal insolvency",
     case_type: "Insolvency",
     status: "Under Review",
@@ -49,6 +51,7 @@ export const cases: Case[] = [
   },
   {
     id: "c3",
+    case_reference: "PLACEHOLDER-C3",
     title: "Muthoot Finance — Gold auction dispute",
     case_type: "Recovery",
     status: "Closed",

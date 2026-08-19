@@ -58,6 +58,7 @@ export type AssetType = (typeof ASSET_TYPES)[number];
 
 export interface Case {
   id: string;
+  case_reference: string;
   title: string;
   case_type: string | null;
   status: string | null;
