@@ -176,17 +176,22 @@ def extract_fields_from_pdf_text(text: str) -> dict:
     # exact section numbers (numbering style and spacing varies enough
     # between branches that "03"/"04" isn't reliable, e.g. "D etails"
     # with a stray space has been seen in at least one branch's PDF).
+    # The anchor's own internal whitespace must also be flexible — real
+    # PDFs (e.g. SARB Jorhat's Bhaskar Jyoti Saikia notice, fetched
+    # 2026-08-18) wrap mid-phrase as "Details of the\nencumbrances",
+    # which a literal single-space match silently fails on, dropping the
+    # property description entirely for that record.
     raw_section_03 = find(
-        r"assets to be sold\.?\s*(.*?)\s*D\s*etails of the encumbrances",
+        r"assets to be sold\.?\s*(.*?)\s*D\s*etails\s+of\s+the\s+encumbrances",
         flags=re.I | re.S,
     )
     property_desc = None
     if raw_section_03:
         property_desc = re.sub(r"\s+", " ", raw_section_03).strip() or None
 
-    loan_account = (
-        find(r"(?:loan|account)\s*(?:no\.?|number)[:\s]*([A-Za-z0-9/-]+)") or
-        find(r"Property ID[-:\s]*([A-Za-z0-9]+)")
+    loan_account = _first_plausible_account_ref(
+        find(r"(?:loan|account)\s*(?:no\.?|number)[:\s]*([A-Za-z0-9/-]+)"),
+        find(r"Property ID[-:\s]*([A-Za-z0-9]+)"),
     )
 
     return {
@@ -194,6 +199,23 @@ def extract_fields_from_pdf_text(text: str) -> dict:
         "loan_account_ref": loan_account,
         "asset_description": property_desc,
     }
+
+
+def _first_plausible_account_ref(*candidates: str | None) -> str | None:
+    """Returns the first candidate that looks like a real account/Property
+    ID rather than a stray word picked up from a flattened PDF table
+    header. Seen in production: a 2-column table ("Property ID | No |
+    EMD (Rs.)") collapses into linear text as "Property ID No EMD
+    (Rs.)...", and the naive 'Property ID[-:\\s]*([A-Za-z0-9]+)' fallback
+    then captures the header word "No" as if it were the ID itself
+    (account_number = "No" — SBI-Manoj Solanki notice, fetched
+    2026-08-18). Real SBI Property IDs/account numbers (e.g.
+    'SBIN200060644879') always contain digits and run considerably
+    longer than a stray header word, so that's the bar for 'plausible'."""
+    for candidate in candidates:
+        if candidate and len(candidate) >= 6 and any(ch.isdigit() for ch in candidate):
+            return candidate
+    return None
 
 
 LOAN_TYPE_KEYWORDS = {

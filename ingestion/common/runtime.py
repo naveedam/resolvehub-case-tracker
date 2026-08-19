@@ -1,0 +1,334 @@
+"""Shared ingestion runtime.
+
+This is the ONLY code that decides what happens to a NormalizedRecord.
+Every adapter (SBI, Canara, future IBBI/NCLT/MCA) hands its records to
+`run_ingestion()` here, which:
+
+  1. Upserts the legacy case/party/document/liability/asset rows using
+     the exact same case_reference dedup key and get-or-create-party
+     logic the original scripts used — so existing behavior for the
+     six production tables is unchanged.
+  2. Writes typed field_observations for every fact the record carries,
+     never overwriting a prior observation — a changed value becomes a
+     new row, and `is_current` is recomputed via a transparent, documented
+     precedence rule (see `_new_observation_wins`).
+  3. Emits a case_events row when a field the app cares about (reserve
+     price, auction date/status, possession status, liability amount)
+     actually changes value.
+  4. Records identifiers deterministically, and — if two different
+     entities claim the same identifier — files an entity_match_candidate
+     instead of silently merging them.
+  5. Is resumable and idempotent: re-running the same source over the
+     same data does not duplicate cases, parties, documents, or
+     observations, and a failure on one record doesn't lose the run.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+
+from ingestion.common.adapter import SourceAdapter
+from ingestion.common.models import EVENT_TRIGGER_FIELDS, FieldObservation, Identifier, NormalizedRecord
+from ingestion.common.store import Store
+
+
+@dataclass
+class IngestionRunResult:
+    run_id: str
+    status: str  # 'success' | 'partial' | 'failed'
+    seen: int
+    ingested: int
+    skipped: int
+    failed: int
+    errors: list[str]
+
+
+def run_ingestion(adapter: SourceAdapter, store: Store) -> IngestionRunResult:
+    source_id = store.get_or_create_source(adapter.source_name, adapter.source_full_name, adapter.source_type)
+    run_id = store.start_run(source_id)
+
+    seen = ingested = skipped = failed = 0
+    errors: list[str] = []
+
+    try:
+        records = adapter.collect()
+    except Exception as e:  # adapter-level failure (e.g. site unreachable) — nothing was processed
+        store.finish_run(run_id, status="failed", seen=0, ingested=0, skipped=0, failed=0, error_summary=str(e))
+        return IngestionRunResult(run_id, "failed", 0, 0, 0, 0, [str(e)])
+
+    for record in records:
+        seen += 1
+        try:
+            outcome = _ingest_record(store, source_id, run_id, record, adapter.source_name)
+            if outcome == "new":
+                ingested += 1
+            else:
+                skipped += 1
+        except Exception as e:  # one bad record must not lose the rest of the run
+            failed += 1
+            errors.append(f"{record.case_reference if hasattr(record, 'case_reference') else '?'}: {e}")
+
+    if failed == 0:
+        status = "success"
+    elif ingested or skipped:
+        status = "partial"
+    else:
+        status = "failed"
+
+    store.finish_run(
+        run_id,
+        status=status,
+        seen=seen,
+        ingested=ingested,
+        skipped=skipped,
+        failed=failed,
+        error_summary="; ".join(errors[:20]) if errors else None,
+    )
+    return IngestionRunResult(run_id, status, seen, ingested, skipped, failed, errors)
+
+
+def _ingest_record(store: Store, source_id: str, run_id: str, record: NormalizedRecord, source_name: str) -> str:
+    """Returns 'new' if this case didn't exist before this call, 'existing'
+    otherwise. Either way, field reconciliation runs — an already-known
+    case can still receive a changed reserve price, a newly available
+    liability figure, etc. on a later run."""
+
+    case_id = store.find_case_id_by_reference(record.case_reference)
+    is_new = case_id is None
+
+    if is_new:
+        case_id = store.insert_case(
+            {
+                "case_reference": record.case_reference,
+                "title": record.title,
+                "case_type": record.case_type,
+                "status": "active",
+                "court_name": None,
+                "next_hearing_date": None,
+                "filing_date": record.filing_date.isoformat() if record.filing_date else None,
+                "estimated_liability": _num(record.get("case", "estimated_liability")),
+                "summary": record.summary,
+                "metadata": {"source": source_name},
+            }
+        )
+
+        lender_id = store.get_or_create_party(record.lender_name, record.lender_type)
+        store.link_case_party(case_id, lender_id, "Lender")
+
+        borrower_id = store.get_or_create_party(record.borrower_name, record.borrower_type)
+        store.link_case_party(case_id, borrower_id, "Borrower")
+
+        for guarantor_name, guarantor_type in record.guarantors:
+            guarantor_id = store.get_or_create_party(guarantor_name, guarantor_type)
+            store.link_case_party(case_id, guarantor_id, "Guarantor")
+
+        for doc in record.documents:
+            store.insert_document(
+                {
+                    "case_id": case_id,
+                    "document_type": doc.document_type,
+                    "document_name": doc.document_name,
+                    "storage_path": doc.storage_path,
+                    "processed": doc.processed,
+                }
+            )
+
+        # seed the case_reference itself as a deterministic identifier —
+        # useful even before CIN/IBBI/NCLT identifiers exist for this case
+        _reconcile_identifier(
+            store,
+            entity_type="case",
+            entity_id=case_id,
+            ident=Identifier(entity_type="case", identifier_type="case_reference", identifier_value=record.case_reference),
+            source_id=source_id,
+        )
+    else:
+        lender_id = store.get_or_create_party(record.lender_name, record.lender_type)
+
+    # --- liability: create on first sight of an amount, or later if this
+    # case previously had none (progressive enrichment) ---
+    outstanding_obs = record.get("liability", "outstanding_amount")
+    liability_id = store.find_liability_id_by_case(case_id)
+    if liability_id is None and outstanding_obs is not None:
+        loan_type_obs = record.get("liability", "loan_type")
+        account_obs = record.get("liability", "account_number")
+        liability_id = store.insert_liability(
+            {
+                "case_id": case_id,
+                "lender_id": lender_id,
+                "loan_type": loan_type_obs.value_text if loan_type_obs else "Other",
+                "account_number": account_obs.value_text if account_obs else None,
+                "outstanding_amount": outstanding_obs.value_numeric,
+                "currency_code": "INR",
+                "secured": True,
+                "remarks": f"Auto-ingested from {source_name}; verify against source document.",
+            }
+        )
+
+    # --- asset: same progressive-enrichment approach ---
+    description_obs = record.get("asset", "description")
+    asset_id = store.find_asset_id_by_case(case_id)
+    if asset_id is None and description_obs is not None:
+        auction_date_obs = record.get("asset", "auction_date")
+        auction_status_obs = record.get("asset", "auction_status")
+        asset_id = store.insert_asset(
+            {
+                "case_id": case_id,
+                "asset_type": record.asset_type or "Other",
+                "description": description_obs.value_text,
+                "auction_date": auction_date_obs.value_date.isoformat()
+                if auction_date_obs and auction_date_obs.value_date
+                else None,
+                "auction_status": auction_status_obs.value_text if auction_status_obs else None,
+            }
+        )
+
+    entity_ids = {"case": case_id, "liability": liability_id, "asset": asset_id}
+
+    for obs in record.field_observations:
+        entity_id = entity_ids.get(obs.entity_type)
+        if entity_id is None:
+            # e.g. a liability-scoped observation before any liability row
+            # exists yet and this particular obs isn't the one that created it
+            continue
+        _reconcile_observation(store, entity_type=obs.entity_type, entity_id=entity_id, obs=obs, source_id=source_id, run_id=run_id, case_id=case_id)
+
+    for ident in record.identifiers:
+        target_entity_id = case_id if ident.entity_type == "case" else None
+        if target_entity_id is None:
+            continue  # Phase 1 only resolves case-level identifiers; party identifiers are future work
+        _reconcile_identifier(store, entity_type=ident.entity_type, entity_id=target_entity_id, ident=ident, source_id=source_id)
+
+    return "new" if is_new else "existing"
+
+
+def _num(obs: FieldObservation | None) -> float | None:
+    return obs.value_numeric if obs else None
+
+
+def _new_observation_wins(prev_published_at: date | None, new_published_at: date | None) -> bool:
+    """Phase 1 precedence rule for which observation is 'current' when two
+    disagree: the observation with the more recent published_at wins.
+    If neither (or both) have a published_at, the newer one — i.e. the one
+    being processed now — wins, since ingestion always processes in real
+    chronological order. This is intentionally simple and fully
+    documented rather than a black box; a later phase can swap in
+    source-trust weighting without changing the storage model."""
+    if new_published_at is None and prev_published_at is None:
+        return True
+    if new_published_at is None:
+        return False
+    if prev_published_at is None:
+        return True
+    return new_published_at >= prev_published_at
+
+
+def _to_date(value) -> date | None:
+    """published_at round-trips through storage as an ISO string (that's
+    exactly what a real Postgres/Supabase read returns too, so this keeps
+    the in-memory test double and the real store behaving identically)."""
+    if value is None or isinstance(value, date):
+        return value
+    return date.fromisoformat(value)
+
+
+def _reconcile_observation(store: Store, *, entity_type: str, entity_id: str, obs: FieldObservation, source_id: str, run_id: str, case_id: str) -> None:
+    current = store.find_current_observations(entity_type, entity_id, obs.field_name)
+    prev = current[0] if current else None
+
+    if prev is not None and prev["source_id"] == source_id and _same_value(prev, obs):
+        return  # identical re-observation from the same source — no-op, keeps re-runs idempotent
+
+    new_wins = _new_observation_wins(_to_date(prev["published_at"]) if prev else None, obs.published_at)
+
+    new_id = store.insert_observation(
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "field_name": obs.field_name,
+            "value_numeric": obs.value_numeric,
+            "value_text": obs.value_text,
+            "value_date": obs.value_date.isoformat() if obs.value_date else None,
+            "value_jsonb": obs.value_jsonb,
+            "unit": obs.unit,
+            "source_id": source_id,
+            "source_record_ref": obs.source_record_ref,
+            "published_at": obs.published_at.isoformat() if obs.published_at else None,
+            "confidence": obs.confidence,
+            "is_current": new_wins,
+            "ingestion_run_id": run_id,
+        }
+    )
+
+    if prev is not None and new_wins:
+        store.set_current(prev["id"], False)
+        store.mark_superseded(prev["id"], new_id)
+
+        value_changed = not _same_value(prev, obs)
+        if value_changed and obs.field_name in EVENT_TRIGGER_FIELDS:
+            store.insert_case_event(
+                {
+                    "case_id": case_id,
+                    "event_type": EVENT_TRIGGER_FIELDS[obs.field_name],
+                    "event_date": obs.published_at.isoformat() if obs.published_at else None,
+                    "description": f"{obs.field_name} changed from {_display(prev)!r} to {obs.value!r}",
+                    "source_id": source_id,
+                    "field_observation_id": new_id,
+                    "ingestion_run_id": run_id,
+                }
+            )
+
+
+def _same_value(prev_row: dict, obs: FieldObservation) -> bool:
+    if prev_row.get("value_numeric") is not None:
+        return prev_row["value_numeric"] == obs.value_numeric
+    if prev_row.get("value_text") is not None:
+        return prev_row["value_text"] == obs.value_text
+    if prev_row.get("value_date") is not None:
+        return _to_date(prev_row["value_date"]) == obs.value_date
+    if prev_row.get("value_jsonb") is not None:
+        return prev_row["value_jsonb"] == obs.value_jsonb
+    return obs.value is None
+
+
+def _display(prev_row: dict):
+    for key in ("value_numeric", "value_text", "value_date", "value_jsonb"):
+        if prev_row.get(key) is not None:
+            return prev_row[key]
+    return None
+
+
+def _reconcile_identifier(store: Store, *, entity_type: str, entity_id: str, ident: Identifier, source_id: str) -> None:
+    existing = store.find_identifier(entity_type, ident.identifier_type, ident.identifier_value)
+    if existing is not None:
+        if existing["entity_id"] == entity_id:
+            return  # already recorded, possibly by a different source — fine
+        store.insert_match_candidate(
+            {
+                "entity_type": entity_type,
+                "entity_id_a": existing["entity_id"],
+                "entity_id_b": entity_id,
+                "match_method": ident.match_method,
+                "confidence": ident.confidence,
+                "evidence": {
+                    "identifier_type": ident.identifier_type,
+                    "identifier_value": ident.identifier_value,
+                    "conflicting_source_id": source_id,
+                },
+                "status": "pending",
+            }
+        )
+        return
+
+    store.insert_identifier(
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "identifier_type": ident.identifier_type,
+            "identifier_value": ident.identifier_value,
+            "source_id": source_id,
+            "match_method": ident.match_method,
+            "confidence": ident.confidence,
+        }
+    )
