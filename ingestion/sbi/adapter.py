@@ -189,8 +189,40 @@ def _parse_iso_date(raw: str | None) -> date | None:
         return None
 
 
+def find_record_by_case_reference(adapter: "SBIAdapter", case_reference: str) -> NormalizedRecord | None:
+    """Walks the adapter's normal collection — the same pages and PDFs it
+    would always walk — and returns the first record whose
+    case_reference matches, or None. This runs BEFORE run_ingestion, so
+    a --case-reference that doesn't match anything is detected (and can
+    be reported) without ever calling run_ingestion — meaning without
+    ever touching Supabase, not even to register a zero-record run."""
+    for record in adapter.collect():
+        if record.case_reference == case_reference:
+            return record
+    return None
+
+
+class SingleRecordAdapter:
+    """Wraps a real adapter so run_ingestion() sees exactly one,
+    already-selected record. Satisfies the same SourceAdapter contract
+    (source_name/source_full_name/source_type/collect()) as the real
+    adapter, so ingestion/common/runtime.py needs no changes at all to
+    support this — it has no idea a filter is in play."""
+
+    def __init__(self, adapter: "SBIAdapter", record: NormalizedRecord):
+        self.source_name = adapter.source_name
+        self.source_full_name = adapter.source_full_name
+        self.source_type = adapter.source_type
+        self._record = record
+
+    def collect(self) -> Iterator[NormalizedRecord]:
+        yield self._record
+
+
 if __name__ == "__main__":
+    import argparse
     import os
+    import sys
 
     from dotenv import load_dotenv
     from supabase import create_client
@@ -198,9 +230,40 @@ if __name__ == "__main__":
     from ingestion.common.runtime import run_ingestion
     from ingestion.common.store import SupabaseStore
 
+    parser = argparse.ArgumentParser(description="Run the SBI ingestion adapter.")
+    parser.add_argument(
+        "--case-reference",
+        metavar="CASE_REF",
+        help=(
+            "Only ingest the single record matching this case_reference "
+            "(e.g. SBI-77dd5b49b548d50d). The adapter still collects "
+            "normally; only this one record is passed to the ingestion "
+            "runtime. If no record matches, nothing is written — not even "
+            "an ingestion_runs row. Omit this flag to run the full "
+            "collection, exactly as before."
+        ),
+    )
+    args = parser.parse_args()
+
     load_dotenv()
     client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
-    result = run_ingestion(SBIAdapter(), SupabaseStore(client))
+    store = SupabaseStore(client)
+    adapter = SBIAdapter()
+
+    if args.case_reference:
+        print(f"Searching SBI's current notices for case_reference={args.case_reference!r} ...")
+        match = find_record_by_case_reference(adapter, args.case_reference)
+        if match is None:
+            print(f"No record found with case_reference={args.case_reference!r}. Nothing written.")
+            sys.exit(1)
+        print(f"Selected case: {match.case_reference} — {match.title}")
+        print(f"  case_type: {match.case_type} | filing_date: {match.filing_date} | "
+              f"documents: {len(match.documents)} | observations: {len(match.field_observations)}")
+        target_adapter = SingleRecordAdapter(adapter, match)
+    else:
+        target_adapter = adapter
+
+    result = run_ingestion(target_adapter, store)
     print(f"SBI run {result.run_id}: {result.status} — seen {result.seen}, "
           f"new {result.ingested}, existing {result.skipped}, failed {result.failed}")
     if result.errors:
