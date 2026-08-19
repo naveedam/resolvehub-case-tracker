@@ -1,0 +1,38 @@
+name: SBI single-record ingestion
+
+# Manual only — never runs on push/PR. Exists so a single, specific
+# case_reference can be ingested (via the existing --case-reference
+# filter in ingestion/sbi/adapter.py) without needing Python installed
+# locally. No ingestion logic lives here — this just invokes the
+# existing SBIAdapter -> run_ingestion -> SupabaseStore code path with
+# credentials from GitHub Secrets, which never appear in logs or in
+# this file.
+on:
+  workflow_dispatch:
+    inputs:
+      case_reference:
+        description: "Exact case_reference to ingest, e.g. SBI-77dd5b49b548d50d"
+        required: true
+        type: string
+
+jobs:
+  ingest-single-record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: ingestion/sbi/requirements.txt
+
+      - run: pip install -r ingestion/sbi/requirements.txt
+
+      - name: Run SBI adapter for one case_reference
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python -m ingestion.sbi.adapter --case-reference "${{ inputs.case_reference }}"
