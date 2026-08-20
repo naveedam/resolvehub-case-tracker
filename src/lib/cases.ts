@@ -3,23 +3,57 @@ import { queryOptions } from "@tanstack/react-query";
 import { supabase } from "./supabase";
 import type { CaseDetail, CaseListRow, DashboardStats } from "./types";
 
+// supabase-js/PostgREST silently caps an unbounded select at the
+// project's configured max-rows (commonly 1000) with no error — it just
+// returns a short page as if that were the whole table. With 11,000+
+// rows in `cases`, a plain `.select("*")` here was quietly returning
+// only the first page, so anything (a newly ingested case, or any
+// case_parties link) past that cutoff was invisible to the list/search
+// UI even though it existed in Supabase. Paginate through every table
+// this file fetches in full so nothing is silently dropped, regardless
+// of how many rows exist or what the project's cap is set to.
+const SUPABASE_PAGE_SIZE = 1000;
+
+async function fetchAllRows<T>(
+  buildPage: (
+    from: number,
+    to: number,
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+): Promise<T[]> {
+  const rows: T[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await buildPage(from, from + SUPABASE_PAGE_SIZE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < SUPABASE_PAGE_SIZE) break; // short page = last page
+    from += SUPABASE_PAGE_SIZE;
+  }
+  return rows;
+}
+
 async function fetchCases(): Promise<CaseListRow[]> {
-  const { data: cases, error } = await supabase
-    .from("cases")
-    .select("*")
-    .is("deleted_at", null);
-  if (error) throw error;
-  if (!cases || cases.length === 0) return [];
-
-  const { data: links, error: linkErr } = await supabase
-    .from("case_parties")
-    .select("case_id, parties(full_name)")
-    .eq("role", "Borrower");
-  if (linkErr) throw linkErr;
-
-  const borrowerByCase = new Map(
-    (links ?? []).map((l: any) => [l.case_id, l.parties?.full_name ?? null]),
+  const cases = await fetchAllRows<CaseListRow>((from, to) =>
+    supabase
+      .from("cases")
+      .select("*")
+      .is("deleted_at", null)
+      .order("id", { ascending: true }) // stable order required for .range() to page correctly
+      .range(from, to),
   );
+  if (cases.length === 0) return [];
+
+  const links = await fetchAllRows<any>((from, to) =>
+    supabase
+      .from("case_parties")
+      .select("case_id, parties(full_name)")
+      .eq("role", "Borrower")
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+
+  const borrowerByCase = new Map(links.map((l) => [l.case_id, l.parties?.full_name ?? null]));
 
   return cases.map((c) => ({
     ...c,
