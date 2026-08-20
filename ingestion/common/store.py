@@ -56,6 +56,14 @@ class Store(Protocol):
     def insert_identifier(self, identifier_row: dict) -> str: ...
     def insert_match_candidate(self, candidate_row: dict) -> str: ...
 
+    # backfill — read legacy tables directly (paginated/batched; the
+    # frontend's cases.ts fetchCases() bug taught this codebase why
+    # every unbounded Supabase select must be paginated explicitly)
+    def list_cases_page(self, from_idx: int, to_idx: int) -> list[dict]: ...
+    def list_liabilities_for_cases(self, case_ids: list[str]) -> list[dict]: ...
+    def list_assets_for_cases(self, case_ids: list[str]) -> list[dict]: ...
+    def list_documents_for_cases(self, case_ids: list[str]) -> list[dict]: ...
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -225,6 +233,23 @@ class InMemoryStore:
         self.match_candidates[cid] = {"id": cid, **candidate_row}
         return cid
 
+    # -- backfill reads --
+    def list_cases_page(self, from_idx: int, to_idx: int) -> list[dict]:
+        ordered = sorted(self.cases.values(), key=lambda c: c["id"])
+        return ordered[from_idx : to_idx + 1]
+
+    def list_liabilities_for_cases(self, case_ids: list[str]) -> list[dict]:
+        ids = set(case_ids)
+        return [l for l in self.liabilities.values() if l["case_id"] in ids]
+
+    def list_assets_for_cases(self, case_ids: list[str]) -> list[dict]:
+        ids = set(case_ids)
+        return [a for a in self.assets.values() if a["case_id"] in ids]
+
+    def list_documents_for_cases(self, case_ids: list[str]) -> list[dict]:
+        ids = set(case_ids)
+        return [d for d in self.documents.values() if d["case_id"] in ids]
+
 
 # ---------------------------------------------------------------------
 # Real Supabase-backed implementation
@@ -378,3 +403,47 @@ class SupabaseStore:
     def insert_match_candidate(self, candidate_row: dict) -> str:
         inserted = self._execute(self.sb.table("entity_match_candidates").insert(candidate_row))
         return inserted.data[0]["id"]
+
+    # -- backfill reads --
+    def list_cases_page(self, from_idx: int, to_idx: int) -> list[dict]:
+        result = self._execute(
+            self.sb.table("cases")
+            .select("id, case_reference, estimated_liability, filing_date, status, next_hearing_date")
+            .is_("deleted_at", "null")
+            .order("id", desc=False)
+            .range(from_idx, to_idx)
+        )
+        return result.data
+
+    def list_liabilities_for_cases(self, case_ids: list[str]) -> list[dict]:
+        if not case_ids:
+            return []
+        result = self._execute(
+            self.sb.table("liabilities")
+            .select("id, case_id, loan_type, account_number, outstanding_amount")
+            .in_("case_id", case_ids)
+            .is_("deleted_at", "null")
+        )
+        return result.data
+
+    def list_assets_for_cases(self, case_ids: list[str]) -> list[dict]:
+        if not case_ids:
+            return []
+        result = self._execute(
+            self.sb.table("assets")
+            .select("id, case_id, description, auction_date, auction_status")
+            .in_("case_id", case_ids)
+            .is_("deleted_at", "null")
+        )
+        return result.data
+
+    def list_documents_for_cases(self, case_ids: list[str]) -> list[dict]:
+        if not case_ids:
+            return []
+        result = self._execute(
+            self.sb.table("documents")
+            .select("id, case_id")
+            .in_("case_id", case_ids)
+            .is_("deleted_at", "null")
+        )
+        return result.data

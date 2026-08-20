@@ -25,7 +25,8 @@ Every adapter (SBI, Canara, future IBBI/NCLT/MCA) hands its records to
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import date
 
 from ingestion.common.adapter import SourceAdapter
@@ -253,6 +254,7 @@ def _reconcile_observation(store: Store, *, entity_type: str, entity_id: str, ob
             "value_jsonb": obs.value_jsonb,
             "unit": obs.unit,
             "source_id": source_id,
+            "source_document_id": obs.source_document_id,
             "source_record_ref": obs.source_record_ref,
             "published_at": obs.published_at.isoformat() if obs.published_at else None,
             "confidence": obs.confidence,
@@ -332,3 +334,245 @@ def _reconcile_identifier(store: Store, *, entity_type: str, entity_id: str, ide
             "confidence": ident.confidence,
         }
     )
+
+
+# ---------------------------------------------------------------------
+# Phase 1.5 — Resolution Profile backfill
+#
+# Reconstructs field_observations/entity_identifiers for cases that
+# already existed BEFORE the evidence layer did — i.e. every case, since
+# all ~11,400 were created by the pre-Phase-1 scrapers. Deliberately
+# reuses _reconcile_observation/_reconcile_identifier (the exact same
+# functions live ingestion uses) rather than re-implementing upsert
+# logic, so idempotency, is_current precedence, and case_events
+# generation all come for free and behave identically. Never creates,
+# modifies, or deletes a case/liability/asset/party/document row — only
+# adds evidence-layer rows alongside what already exists.
+# ---------------------------------------------------------------------
+
+BACKFILL_PAGE_SIZE = 1000
+
+# Legacy columns don't carry their own type info the way a FieldObservation
+# does — this is how we know which value_* to populate.
+_LEGACY_NUMERIC_FIELDS = {"estimated_liability", "outstanding_amount"}
+_LEGACY_DATE_FIELDS = {"filing_date", "next_hearing_date", "auction_date"}
+
+_CASE_LEGACY_FIELDS = ("estimated_liability", "status", "filing_date", "next_hearing_date")
+_LIABILITY_LEGACY_FIELDS = ("outstanding_amount", "loan_type", "account_number")
+_ASSET_LEGACY_FIELDS = ("description", "auction_date", "auction_status")
+
+
+@dataclass
+class BackfillSummary:
+    cases_processed: int
+    observations_written: int
+    identifier_reconciliations: int  # case_reference + any account refs seen; conflicts are safely filed as match candidates, not merged
+    by_source: dict[str, int] = field(default_factory=dict)
+    elapsed_seconds: float = 0.0
+
+
+def _infer_source_for_case_reference(case_reference: str) -> tuple[str, str, str]:
+    """(name, full_name, source_type) for get_or_create_source, inferred
+    from the case_reference prefix each adapter's make_case_reference()
+    already stamps on every case it creates. Reuses the SAME 'SBI'/
+    'Canara' source rows live ingestion uses — these observations
+    genuinely did come from those banks, just extracted by the
+    pre-Phase-1 scrapers before the evidence layer existed."""
+    if case_reference.startswith("SBI-"):
+        return "SBI", "State Bank of India", "bank"
+    if case_reference.startswith("CANARA-"):
+        return "Canara", "Canara Bank", "bank"
+    return "Legacy", "Legacy / unattributed import", "manual"
+
+
+def _legacy_observation(entity_type: str, field_name: str, value, source_document_id: str | None) -> FieldObservation | None:
+    kwargs: dict = {
+        "entity_type": entity_type,
+        "field_name": field_name,
+        "confidence": "source_derived",  # genuinely bank-reported data, just backfilled late
+        "source_document_id": source_document_id,
+    }
+    try:
+        if field_name in _LEGACY_NUMERIC_FIELDS:
+            if value is None:
+                return None
+            kwargs["value_numeric"] = float(value)
+            kwargs["unit"] = "INR"
+        elif field_name in _LEGACY_DATE_FIELDS:
+            if not value:
+                return None
+            kwargs["value_date"] = value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+        else:
+            text = str(value).strip() if value is not None else ""
+            if not text:
+                return None
+            kwargs["value_text"] = text
+        return FieldObservation(**kwargs)
+    except (ValueError, TypeError):
+        return None  # malformed legacy value — skip rather than crash the whole backfill
+
+
+def backfill_resolution_profiles(
+    store: Store, *, page_size: int = BACKFILL_PAGE_SIZE, progress_every: int = 500
+) -> BackfillSummary:
+    start = time.monotonic()
+    cases_processed = 0
+    observations_written = 0
+    identifier_reconciliations = 0
+    by_source: dict[str, int] = {}
+    source_ids: dict[str, str] = {}
+    run_ids: dict[str, str] = {}
+    run_counts: dict[str, int] = {}
+
+    from_idx = 0
+    while True:
+        page = store.list_cases_page(from_idx, from_idx + page_size - 1)
+        if not page:
+            break
+
+        case_ids = [c["id"] for c in page]
+        liabilities_by_case: dict[str, list[dict]] = {}
+        for liability in store.list_liabilities_for_cases(case_ids):
+            liabilities_by_case.setdefault(liability["case_id"], []).append(liability)
+        assets_by_case: dict[str, list[dict]] = {}
+        for asset in store.list_assets_for_cases(case_ids):
+            assets_by_case.setdefault(asset["case_id"], []).append(asset)
+        documents_by_case: dict[str, list[dict]] = {}
+        for doc in store.list_documents_for_cases(case_ids):
+            documents_by_case.setdefault(doc["case_id"], []).append(doc)
+
+        for case in page:
+            case_id = case["id"]
+            case_reference = case["case_reference"]
+            name, full_name, source_type = _infer_source_for_case_reference(case_reference)
+
+            if name not in source_ids:
+                source_ids[name] = store.get_or_create_source(name, full_name, source_type)
+                run_ids[name] = store.start_run(source_ids[name])
+                run_counts[name] = 0
+            source_id = source_ids[name]
+            run_id = run_ids[name]
+
+            documents = documents_by_case.get(case_id, [])
+            source_document_id = documents[0]["id"] if documents else None
+
+            for field_name in _CASE_LEGACY_FIELDS:
+                obs = _legacy_observation("case", field_name, case.get(field_name), source_document_id)
+                if obs is None:
+                    continue
+                _reconcile_observation(
+                    store, entity_type="case", entity_id=case_id, obs=obs,
+                    source_id=source_id, run_id=run_id, case_id=case_id,
+                )
+                observations_written += 1
+
+            for liability in liabilities_by_case.get(case_id, []):
+                for field_name in _LIABILITY_LEGACY_FIELDS:
+                    obs = _legacy_observation("liability", field_name, liability.get(field_name), source_document_id)
+                    if obs is None:
+                        continue
+                    _reconcile_observation(
+                        store, entity_type="liability", entity_id=liability["id"], obs=obs,
+                        source_id=source_id, run_id=run_id, case_id=case_id,
+                    )
+                    observations_written += 1
+                if liability.get("account_number"):
+                    _reconcile_identifier(
+                        store, entity_type="case", entity_id=case_id,
+                        ident=Identifier(
+                            entity_type="case", identifier_type="bank_account_ref",
+                            identifier_value=liability["account_number"],
+                        ),
+                        source_id=source_id,
+                    )
+                    identifier_reconciliations += 1
+
+            for asset in assets_by_case.get(case_id, []):
+                for field_name in _ASSET_LEGACY_FIELDS:
+                    obs = _legacy_observation("asset", field_name, asset.get(field_name), source_document_id)
+                    if obs is None:
+                        continue
+                    _reconcile_observation(
+                        store, entity_type="asset", entity_id=asset["id"], obs=obs,
+                        source_id=source_id, run_id=run_id, case_id=case_id,
+                    )
+                    observations_written += 1
+
+            _reconcile_identifier(
+                store, entity_type="case", entity_id=case_id,
+                ident=Identifier(entity_type="case", identifier_type="case_reference", identifier_value=case_reference),
+                source_id=source_id,
+            )
+            identifier_reconciliations += 1
+
+            cases_processed += 1
+            run_counts[name] += 1
+            by_source[name] = by_source.get(name, 0) + 1
+
+            if cases_processed % progress_every == 0:
+                elapsed = time.monotonic() - start
+                print(
+                    f"  ...{cases_processed} cases processed "
+                    f"({observations_written} observations, {identifier_reconciliations} identifier "
+                    f"reconciliations so far, {elapsed:.0f}s elapsed)"
+                )
+
+        if len(page) < page_size:
+            break
+        from_idx += page_size
+
+    for name, run_id in run_ids.items():
+        store.finish_run(
+            run_id, status="success", seen=run_counts[name], ingested=run_counts[name], skipped=0, failed=0,
+            error_summary=None,
+        )
+
+    return BackfillSummary(
+        cases_processed=cases_processed,
+        observations_written=observations_written,
+        identifier_reconciliations=identifier_reconciliations,
+        by_source=by_source,
+        elapsed_seconds=time.monotonic() - start,
+    )
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+
+    from dotenv import load_dotenv
+    from supabase import create_client
+
+    from ingestion.common.store import SupabaseStore
+
+    parser = argparse.ArgumentParser(description="Shared ResolveHub ingestion runtime.")
+    parser.add_argument(
+        "--backfill-resolution-profiles",
+        action="store_true",
+        help=(
+            "Reconstruct field_observations/entity_identifiers for every "
+            "non-deleted case already in Supabase, from its existing "
+            "cases/liabilities/assets/documents columns. Never creates, "
+            "modifies, or deletes a case/liability/asset/party/document "
+            "row. Safe to re-run — idempotent, same as live ingestion."
+        ),
+    )
+    args = parser.parse_args()
+
+    if not args.backfill_resolution_profiles:
+        parser.print_help()
+        raise SystemExit(0)
+
+    load_dotenv()
+    client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+    store = SupabaseStore(client)
+
+    print("Starting Resolution Profile backfill for all non-deleted cases...")
+    summary = backfill_resolution_profiles(store)
+
+    print("\nBackfill complete.")
+    print(f"  cases processed:            {summary.cases_processed}")
+    print(f"  observations written:       {summary.observations_written}")
+    print(f"  identifier reconciliations: {summary.identifier_reconciliations}")
+    print(f"  by source:                  {summary.by_source}")
+    print(f"  elapsed:                    {summary.elapsed_seconds:.0f}s")
