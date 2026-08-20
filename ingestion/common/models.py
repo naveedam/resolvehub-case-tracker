@@ -27,7 +27,7 @@ MatchMethod = Literal["deterministic", "fuzzy"]
 # something that already exists.
 CASE_FIELDS = {"estimated_liability", "status", "filing_date", "next_hearing_date", "npa_date"}
 LIABILITY_FIELDS = {"outstanding_amount", "account_number", "loan_type"}
-ASSET_FIELDS = {"reserve_price", "auction_date", "auction_status", "description", "possession_status"}
+ASSET_FIELDS = {"reserve_price", "auction_date", "auction_status", "description", "possession_status", "asset_classification"}
 
 _FIELDS_BY_ENTITY = {"case": CASE_FIELDS, "liability": LIABILITY_FIELDS, "asset": ASSET_FIELDS}
 
