@@ -53,6 +53,7 @@ class FieldObservation:
     value_jsonb: dict[str, Any] | None = None
     unit: str | None = None
     source_document_url: str | None = None
+    source_document_id: str | None = None  # FK to an existing documents row, when known (e.g. backfill)
     source_record_ref: str | None = None
     published_at: date | None = None
     confidence: Confidence = "source_derived"
