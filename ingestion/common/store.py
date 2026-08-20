@@ -29,6 +29,21 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+# A page of 1000 case_ids in a single .in_("case_id", [...]) filter builds a
+# GET request URL with ~1000 UUIDs (~37KB of query string) — large enough
+# that PostgREST/the transport in front of it can reject it outright
+# ("JSON could not be generated", 400) rather than reject individual rows.
+# This is purely a request-size limit, unrelated to list_cases_page's own
+# .range()-based pagination (two integers — no such limit applies there),
+# so only the .in_()-based batch reads need chunking.
+IN_FILTER_CHUNK_SIZE = 200
+
+
+def _chunked(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
+
+
 class Store(Protocol):
     # sources / runs
     def get_or_create_source(self, name: str, full_name: str, source_type: str) -> str: ...
@@ -416,34 +431,37 @@ class SupabaseStore:
         return result.data
 
     def list_liabilities_for_cases(self, case_ids: list[str]) -> list[dict]:
-        if not case_ids:
-            return []
-        result = self._execute(
-            self.sb.table("liabilities")
-            .select("id, case_id, loan_type, account_number, outstanding_amount")
-            .in_("case_id", case_ids)
-            .is_("deleted_at", "null")
-        )
-        return result.data
+        rows: list[dict] = []
+        for chunk in _chunked(case_ids, IN_FILTER_CHUNK_SIZE):
+            result = self._execute(
+                self.sb.table("liabilities")
+                .select("id, case_id, loan_type, account_number, outstanding_amount")
+                .in_("case_id", chunk)
+                .is_("deleted_at", "null")
+            )
+            rows.extend(result.data)
+        return rows
 
     def list_assets_for_cases(self, case_ids: list[str]) -> list[dict]:
-        if not case_ids:
-            return []
-        result = self._execute(
-            self.sb.table("assets")
-            .select("id, case_id, description, auction_date, auction_status")
-            .in_("case_id", case_ids)
-            .is_("deleted_at", "null")
-        )
-        return result.data
+        rows: list[dict] = []
+        for chunk in _chunked(case_ids, IN_FILTER_CHUNK_SIZE):
+            result = self._execute(
+                self.sb.table("assets")
+                .select("id, case_id, description, auction_date, auction_status")
+                .in_("case_id", chunk)
+                .is_("deleted_at", "null")
+            )
+            rows.extend(result.data)
+        return rows
 
     def list_documents_for_cases(self, case_ids: list[str]) -> list[dict]:
-        if not case_ids:
-            return []
-        result = self._execute(
-            self.sb.table("documents")
-            .select("id, case_id")
-            .in_("case_id", case_ids)
-            .is_("deleted_at", "null")
-        )
-        return result.data
+        rows: list[dict] = []
+        for chunk in _chunked(case_ids, IN_FILTER_CHUNK_SIZE):
+            result = self._execute(
+                self.sb.table("documents")
+                .select("id, case_id")
+                .in_("case_id", chunk)
+                .is_("deleted_at", "null")
+            )
+            rows.extend(result.data)
+        return rows
