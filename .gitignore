@@ -36,3 +36,4 @@ scrape_log.txt
 **/debug_pdf_text/
 ingestion/canara/canara_master.pdf
 .venv/
+.env
