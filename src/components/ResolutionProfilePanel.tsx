@@ -1,8 +1,22 @@
+import { useState } from "react";
+
 import { useQuery } from "@tanstack/react-query";
+import {
+  Banknote,
+  Check,
+  ChevronDown,
+  FileText,
+  Gavel,
+  Home,
+  Scale,
+  ShieldCheck,
+  Sparkles,
+  User,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Table,
   TableBody,
@@ -23,9 +37,16 @@ import {
 } from "@/lib/resolution-profile";
 import type { CaseDetail, FieldObservation, Source } from "@/lib/types";
 
+// ResolveHub brand accent — deep teal / ivory / slate. Scoped to this
+// component only (arbitrary Tailwind values, not a global theme change)
+// so the rest of the app keeps its existing IBM Plex / blue-grey chrome.
+const TEAL = "#0F4C46";
+const TEAL_DARK = "#0B3B37";
+const IVORY = "#FAF8F3";
+
 const CONFIDENCE_TONE: Record<FieldObservation["confidence"], string> = {
   verified: "bg-success/12 text-success border-success/30",
-  source_derived: "bg-secondary text-foreground border-border",
+  source_derived: "bg-slate-100 text-slate-700 border-slate-200",
   inferred: "bg-warning/15 text-warning-foreground border-warning/40",
 };
 
@@ -38,7 +59,7 @@ function ConfidenceBadge({ obs }: { obs: FieldObservation | undefined }) {
   );
 }
 
-function SourceLine({
+function SourceBadge({
   obs,
   sourcesById,
 }: {
@@ -47,11 +68,101 @@ function SourceLine({
 }) {
   if (!obs) return null;
   const source = sourcesById[obs.source_id];
+  if (!source) return null;
   return (
-    <p className="mt-1 text-xs text-muted-foreground">
-      {source?.name ?? "Unknown source"}
-      {obs.published_at ? ` · ${formatDate(obs.published_at)}` : ""}
-    </p>
+    <Badge variant="outline" className="border-slate-200 bg-white text-xs text-slate-600">
+      {source.name}
+    </Badge>
+  );
+}
+
+function KpiCard({
+  icon: Icon,
+  label,
+  children,
+}: {
+  icon: React.ElementType;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card
+      className="overflow-hidden border-t-4 shadow-none"
+      style={{ borderTopColor: TEAL, backgroundColor: IVORY }}
+    >
+      <CardContent className="space-y-2 pt-5">
+        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+          <Icon className="h-3.5 w-3.5" style={{ color: TEAL }} />
+          {label}
+        </div>
+        {children}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Recovery journey — inferred from which signals actually exist on the
+// case, not a fabricated score. Every SARFAESI case starts with a
+// notice; possession/auction/DRT stages light up only when their
+// underlying field has been observed.
+type Stage = "notice" | "possession" | "auction" | "drt";
+const STAGES: { key: Stage; label: string; icon: React.ElementType }[] = [
+  { key: "notice", label: "Notice", icon: FileText },
+  { key: "possession", label: "Possession", icon: Home },
+  { key: "auction", label: "Auction", icon: Gavel },
+  { key: "drt", label: "DRT / NCLT", icon: Scale },
+];
+
+function inferStageIndex(opts: {
+  hasAuction: boolean;
+  hasPossession: boolean;
+  isLegalProceeding: boolean;
+}): number {
+  if (opts.isLegalProceeding) return 3;
+  if (opts.hasAuction) return 2;
+  if (opts.hasPossession) return 1;
+  return 0;
+}
+
+function RecoveryJourney({ currentIndex }: { currentIndex: number }) {
+  return (
+    <div className="flex items-center">
+      {STAGES.map((stage, i) => {
+        const done = i < currentIndex;
+        const active = i === currentIndex;
+        const Icon = stage.icon;
+        return (
+          <div key={stage.key} className="flex flex-1 items-center last:flex-none">
+            <div className="flex flex-col items-center gap-1.5">
+              <div
+                className={`flex h-9 w-9 items-center justify-center rounded-full border-2 transition-colors ${
+                  active
+                    ? "text-white"
+                    : done
+                      ? "border-transparent bg-slate-100 text-slate-500"
+                      : "border-slate-200 bg-white text-slate-300"
+                }`}
+                style={active ? { backgroundColor: TEAL, borderColor: TEAL } : undefined}
+              >
+                {done ? <Check className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
+              </div>
+              <span
+                className={`text-xs font-medium ${active ? "" : done ? "text-slate-500" : "text-slate-400"}`}
+                style={active ? { color: TEAL_DARK } : undefined}
+              >
+                {stage.label}
+              </span>
+            </div>
+            {i < STAGES.length - 1 && (
+              <div
+                className="mx-2 h-0.5 flex-1"
+                style={{ backgroundColor: i < currentIndex ? TEAL : "#e2e8f0" }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -61,6 +172,7 @@ function SourceLine({
  * must never take down the rest of an otherwise-working case page. */
 export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail }) {
   const { data, error, isLoading } = useQuery(resolutionProfileQueryOptions(caseDetail));
+  const [scheduleOpen, setScheduleOpen] = useState(false);
 
   if (error) {
     console.error("[ResolutionProfilePanel] failed to load evidence data:", error);
@@ -82,7 +194,6 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
   const get = (entityType: FieldObservation["entity_type"], field: string) =>
     findCurrent(observations, entityType, field);
 
-  // --- current-value fields, once, reused across cards ---
   const status = get("case", "status");
   const filingDate = get("case", "filing_date");
   const nextHearing = get("case", "next_hearing_date");
@@ -99,245 +210,289 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
   const reservePrice = get("asset", "reserve_price");
 
   const liabilityHeadline = outstandingAmount ?? estimatedLiability;
+  const stageIndex = inferStageIndex({
+    hasAuction: !!auctionStatus || !!auctionDate,
+    hasPossession: !!possessionStatus,
+    isLegalProceeding:
+      (caseDetail.case.case_type ?? "").toUpperCase().includes("DRT") ||
+      (caseDetail.case.case_type ?? "").toUpperCase().includes("NCLT"),
+  });
 
-  // --- evidence sources summary: which sources fed the values shown above ---
-  const sourceCounts = new Map<string, number>();
-  for (const obs of current)
-    sourceCounts.set(obs.source_id, (sourceCounts.get(obs.source_id) ?? 0) + 1);
-  const sourceSummaries = Array.from(sourceCounts.entries())
-    .map(([sourceId, count]) => ({ source: sourcesById[sourceId], count }))
-    .filter((s): s is { source: Source; count: number } => !!s.source)
-    .sort((a, b) => b.count - a.count);
+  const assetSummarySentence = [description?.value_text, assetClassification?.value_text]
+    .filter(Boolean)
+    .join(" — ");
+  const hasLegalSchedule = !!(
+    description ||
+    assetClassification ||
+    auctionDate ||
+    auctionStatus ||
+    possessionStatus ||
+    reservePrice
+  );
+
+  // Evidence tab: group current observations by source, not a flat row-per-field table.
+  const bySource = new Map<string, FieldObservation[]>();
+  for (const obs of current) {
+    const list = bySource.get(obs.source_id) ?? [];
+    list.push(obs);
+    bySource.set(obs.source_id, list);
+  }
+  const sourceGroups = Array.from(bySource.entries())
+    .map(([sourceId, obs]) => ({ source: sourcesById[sourceId], obs }))
+    .filter((g): g is { source: Source; obs: FieldObservation[] } => !!g.source)
+    .sort((a, b) => b.obs.length - a.obs.length);
 
   return (
     <Card className="mt-8 overflow-hidden">
       <CardHeader>
-        <CardTitle className="font-serif text-xl">Resolution profile</CardTitle>
+        <CardTitle className="text-xl font-semibold" style={{ color: TEAL_DARK }}>
+          Resolution profile
+        </CardTitle>
         <p className="text-sm text-muted-foreground">
           What we know about this case, where we learned it, and how it has changed over time.
         </p>
       </CardHeader>
-      <CardContent>
-        <Tabs defaultValue="current">
+      <CardContent className="space-y-6">
+        {/* ---------- Executive snapshot: 4 KPI cards, 5-second scan ---------- */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <KpiCard icon={Banknote} label="Outstanding liability">
+            {liabilityHeadline ? (
+              <>
+                <p className="text-2xl font-bold tabular-nums" style={{ color: TEAL_DARK }}>
+                  {currentValue(liabilityHeadline)}
+                </p>
+                <ConfidenceBadge obs={liabilityHeadline} />
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">Not yet recorded</p>
+            )}
+          </KpiCard>
+
+          <KpiCard icon={ShieldCheck} label="Secured asset">
+            {assetClassification || description ? (
+              <>
+                <p className="text-sm font-semibold leading-snug text-slate-800">
+                  {assetClassification?.value_text ?? "Asset on record"}
+                </p>
+                {reservePrice && (
+                  <p className="text-xs tabular-nums text-slate-500">
+                    Reserve {currentValue(reservePrice)}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">Not yet recorded</p>
+            )}
+          </KpiCard>
+
+          <KpiCard icon={Gavel} label="Recovery stage">
+            <p className="text-sm font-semibold" style={{ color: TEAL_DARK }}>
+              {STAGES[stageIndex]?.label ?? "Notice"}
+            </p>
+            <p className="text-xs text-slate-500">
+              {auctionStatus?.value_text ??
+                possessionStatus?.value_text ??
+                caseDetail.case.status ??
+                "In progress"}
+            </p>
+          </KpiCard>
+
+          <KpiCard icon={User} label="Borrower">
+            <p className="text-sm font-semibold leading-snug text-slate-800">
+              {caseDetail.case.title}
+            </p>
+            <p className="text-xs text-slate-500">{caseDetail.case.case_reference}</p>
+          </KpiCard>
+        </div>
+
+        {/* ---------- Recovery journey ---------- */}
+        <div className="rounded-lg border border-slate-200 bg-white p-5">
+          <p className="mb-4 text-xs font-medium uppercase tracking-wide text-slate-500">
+            Recovery journey{" "}
+            <span className="normal-case text-slate-400">— inferred from available signals</span>
+          </p>
+          <RecoveryJourney currentIndex={stageIndex} />
+          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-500">
+            {npaDate && <span>NPA: {formatDate(npaDate.value_date)}</span>}
+            {auctionDate && <span>Auction date: {formatDate(auctionDate.value_date)}</span>}
+            {nextHearing && <span>Next hearing: {formatDate(nextHearing.value_date)}</span>}
+            {filingDate && <span>Filed: {formatDate(filingDate.value_date)}</span>}
+          </div>
+        </div>
+
+        {/* ---------- Asset Intelligence ---------- */}
+        <Card className="border-slate-200 shadow-none">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-600">Asset intelligence</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {hasLegalSchedule ? (
+              <Collapsible open={scheduleOpen} onOpenChange={setScheduleOpen}>
+                <p className="text-sm leading-snug text-slate-700">
+                  {assetSummarySentence || "Asset details recorded; see full schedule below."}
+                </p>
+                <SourceBadge obs={description ?? assetClassification} sourcesById={sourcesById} />
+                <CollapsibleTrigger asChild>
+                  <button
+                    className="mt-3 flex items-center gap-1 text-xs font-medium hover:underline"
+                    style={{ color: TEAL }}
+                  >
+                    <ChevronDown
+                      className={`h-3.5 w-3.5 transition-transform ${scheduleOpen ? "rotate-180" : ""}`}
+                    />
+                    {scheduleOpen ? "Hide" : "View"} complete legal schedule
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="mt-3 space-y-2 border-t border-slate-100 pt-3 text-sm">
+                  {description && <p className="text-slate-700">{description.value_text}</p>}
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                    {assetClassification && (
+                      <>
+                        <dt className="text-slate-500">Classification</dt>
+                        <dd className="text-slate-700">{assetClassification.value_text}</dd>
+                      </>
+                    )}
+                    {possessionStatus && (
+                      <>
+                        <dt className="text-slate-500">Possession</dt>
+                        <dd className="text-slate-700">{possessionStatus.value_text}</dd>
+                      </>
+                    )}
+                    {auctionStatus && (
+                      <>
+                        <dt className="text-slate-500">Auction status</dt>
+                        <dd className="text-slate-700">{auctionStatus.value_text}</dd>
+                      </>
+                    )}
+                    {auctionDate && (
+                      <>
+                        <dt className="text-slate-500">Auction date</dt>
+                        <dd className="text-slate-700">{formatDate(auctionDate.value_date)}</dd>
+                      </>
+                    )}
+                    {reservePrice && (
+                      <>
+                        <dt className="text-slate-500">Reserve price</dt>
+                        <dd className="text-slate-700">{currentValue(reservePrice)}</dd>
+                      </>
+                    )}
+                    {(loanType || accountNumber) && (
+                      <>
+                        <dt className="text-slate-500">Loan</dt>
+                        <dd className="text-slate-700">
+                          {[loanType?.value_text, accountNumber?.value_text]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </dd>
+                      </>
+                    )}
+                  </dl>
+                </CollapsibleContent>
+              </Collapsible>
+            ) : (
+              <p className="text-sm text-muted-foreground">No asset details recorded yet.</p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* ---------- ResolveHub Insight — reserved for future AI ---------- */}
+        <Card className="border-dashed border-slate-300 bg-slate-50/60 shadow-none">
+          <CardContent className="flex items-center gap-3 py-5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white ring-1 ring-slate-200">
+              <Sparkles className="h-4 w-4 text-slate-400" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-600">ResolveHub Insight</p>
+              <p className="text-xs text-slate-500">
+                AI-generated resolution guidance for this case isn't available yet — reserved for a
+                future release.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* ---------- Timeline / Evidence ---------- */}
+        <Tabs defaultValue="timeline">
           <TabsList>
-            <TabsTrigger value="current">Current values</TabsTrigger>
             <TabsTrigger value="timeline">Timeline ({events.length})</TabsTrigger>
             <TabsTrigger value="evidence">Evidence</TabsTrigger>
           </TabsList>
 
-          {/* ---------- Current Values: KPI / intelligence cards ---------- */}
-          <TabsContent value="current">
-            <div className="grid grid-cols-1 gap-4 py-2 md:grid-cols-2">
-              {/* Borrower Snapshot */}
-              <Card className="shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium text-muted-foreground">
-                    Borrower snapshot
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  <p className="font-serif text-lg leading-tight">{caseDetail.case.title}</p>
-                  <p className="text-xs text-muted-foreground">{caseDetail.case.case_reference}</p>
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <Badge variant="outline">
-                      {caseDetail.case.case_type ?? "Case type unknown"}
-                    </Badge>
-                    {(status?.value_text ?? caseDetail.case.status) && (
-                      <Badge variant="outline" className="capitalize">
-                        {status?.value_text ?? caseDetail.case.status}
-                      </Badge>
-                    )}
-                    <ConfidenceBadge obs={status} />
-                  </div>
-                  {(filingDate?.value_date ?? caseDetail.case.filing_date) && (
-                    <p className="text-xs text-muted-foreground">
-                      Filed {formatDate(filingDate?.value_date ?? caseDetail.case.filing_date)}
-                    </p>
-                  )}
-                </CardContent>
-              </Card>
-
-              {/* Outstanding Liability */}
-              <Card className="shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium text-muted-foreground">
-                    Outstanding liability
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {liabilityHeadline ? (
-                    <>
-                      <p className="font-serif text-2xl tabular-nums">
-                        {currentValue(liabilityHeadline)}
-                      </p>
-                      <div className="flex items-center gap-2">
-                        <ConfidenceBadge obs={liabilityHeadline} />
-                        {historyFor(observations, liabilityHeadline).length > 1 && (
-                          <span className="text-xs text-muted-foreground">
-                            {historyFor(observations, liabilityHeadline).length} observations over
-                            time
-                          </span>
-                        )}
-                      </div>
-                      <SourceLine obs={liabilityHeadline} sourcesById={sourcesById} />
-                    </>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">
-                      No liability amount recorded yet.
-                    </p>
-                  )}
-                  {(loanType || accountNumber) && (
-                    <>
-                      <Separator />
-                      <div className="space-y-1 text-sm">
-                        {loanType && <p>{loanType.value_text}</p>}
-                        {accountNumber && (
-                          <p className="text-muted-foreground">
-                            Account: {accountNumber.value_text}
-                          </p>
-                        )}
-                      </div>
-                    </>
-                  )}
-                </CardContent>
-              </Card>
-
-              {/* Asset Summary */}
-              <Card className="shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium text-muted-foreground">
-                    Asset summary
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {description || assetClassification ? (
-                    <>
-                      {description && (
-                        <p className="text-sm leading-snug">{description.value_text}</p>
-                      )}
-                      <div className="flex flex-wrap gap-2">
-                        {assetClassification && (
-                          <Badge variant="outline">{assetClassification.value_text}</Badge>
-                        )}
-                        {reservePrice && (
-                          <Badge variant="outline" className="tabular-nums">
-                            Reserve {currentValue(reservePrice)}
+          <TabsContent value="timeline">
+            {events.length === 0 ? (
+              <p className="py-6 text-sm text-muted-foreground">No tracked changes yet.</p>
+            ) : (
+              <ol className="relative mt-2 space-y-6 border-l-2 border-slate-200 pl-6">
+                {events.map((event) => {
+                  const eventSource = event.source_id ? sourcesById[event.source_id] : undefined;
+                  return (
+                    <li key={event.id} className="relative">
+                      <span
+                        className="absolute -left-[31px] top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full ring-4 ring-white"
+                        style={{ backgroundColor: TEAL }}
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                          {formatDate(event.event_date)}
+                        </span>
+                        {eventSource && (
+                          <Badge
+                            variant="outline"
+                            className="border-slate-200 text-xs text-slate-600"
+                          >
+                            {eventSource.name}
                           </Badge>
                         )}
                       </div>
-                      <SourceLine
-                        obs={description ?? assetClassification}
-                        sourcesById={sourcesById}
-                      />
-                    </>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">No asset details recorded yet.</p>
-                  )}
-                </CardContent>
-              </Card>
-
-              {/* Recovery Stage */}
-              <Card className="shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium text-muted-foreground">
-                    Recovery stage
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {auctionStatus || possessionStatus ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {auctionStatus && (
-                        <Badge variant="outline" className="capitalize">
-                          Auction: {auctionStatus.value_text}
-                        </Badge>
-                      )}
-                      {possessionStatus && (
-                        <Badge variant="outline" className="capitalize">
-                          Possession: {possessionStatus.value_text}
-                        </Badge>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">
-                      No recovery-stage signal recorded yet.
-                    </p>
-                  )}
-                  <div className="space-y-1 text-xs text-muted-foreground">
-                    {auctionDate && <p>Auction date: {formatDate(auctionDate.value_date)}</p>}
-                    {nextHearing && <p>Next hearing: {formatDate(nextHearing.value_date)}</p>}
-                    {npaDate && <p>NPA date: {formatDate(npaDate.value_date)}</p>}
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
+                      <p className="mt-0.5 text-sm font-medium text-slate-800">
+                        {event.description ?? event.event_type}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
           </TabsContent>
 
-          {/* ---------- Evidence Timeline ---------- */}
-          <TabsContent value="timeline">
-            <Card className="mt-2 shadow-none">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
-                  Evidence timeline
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {events.length === 0 ? (
-                  <p className="py-4 text-sm text-muted-foreground">No tracked changes yet.</p>
-                ) : (
-                  <ul className="space-y-4">
-                    {events.map((event) => (
-                      <li key={event.id} className="border-l-2 border-border pl-4">
-                        <p className="text-xs tracking-wide text-muted-foreground uppercase">
-                          {formatDate(event.event_date)}
-                        </p>
-                        <p className="text-sm font-medium">
-                          {event.description ?? event.event_type}
-                        </p>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          {/* ---------- Evidence: sources + identifiers ---------- */}
           <TabsContent value="evidence">
             <div className="mt-2 grid grid-cols-1 gap-4 md:grid-cols-2">
-              <Card className="shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium text-muted-foreground">
-                    Evidence sources
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {sourceSummaries.length === 0 ? (
-                    <p className="py-4 text-sm text-muted-foreground">No sourced values yet.</p>
-                  ) : (
-                    <ul className="space-y-3">
-                      {sourceSummaries.map(({ source, count }) => (
-                        <li key={source.id} className="flex items-center justify-between">
-                          <div>
-                            <p className="text-sm font-medium">{source.full_name}</p>
-                            <p className="text-xs capitalize text-muted-foreground">
-                              {source.source_type}
-                            </p>
-                          </div>
-                          <Badge variant="outline">
-                            {count} field{count === 1 ? "" : "s"}
-                          </Badge>
-                        </li>
+              {sourceGroups.length === 0 ? (
+                <p className="py-6 text-sm text-muted-foreground">No sourced values yet.</p>
+              ) : (
+                sourceGroups.map(({ source, obs }) => (
+                  <Card key={source.id} className="shadow-none">
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-medium text-slate-700">
+                          {source.full_name}
+                        </CardTitle>
+                        <Badge variant="outline" className="capitalize text-slate-500">
+                          {source.source_type}
+                        </Badge>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      {obs.map((o) => (
+                        <div key={o.id} className="flex items-center justify-between text-sm">
+                          <span className="text-slate-500">{o.field_name.replace(/_/g, " ")}</span>
+                          <span className="flex items-center gap-2 font-medium text-slate-800">
+                            {currentValue(o)}
+                            {historyFor(observations, o).length > 1 && (
+                              <span className="text-xs font-normal text-slate-400">
+                                ({historyFor(observations, o).length}×)
+                              </span>
+                            )}
+                          </span>
+                        </div>
                       ))}
-                    </ul>
-                  )}
-                </CardContent>
-              </Card>
+                    </CardContent>
+                  </Card>
+                ))
+              )}
 
               <Card className="shadow-none">
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium text-muted-foreground">
-                    Identifiers
-                  </CardTitle>
+                  <CardTitle className="text-sm font-medium text-slate-700">Identifiers</CardTitle>
                 </CardHeader>
                 <CardContent>
                   {identifiers.length === 0 ? (
