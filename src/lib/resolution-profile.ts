@@ -117,6 +117,19 @@ export function currentObservations(observations: FieldObservation[]): FieldObse
   return observations.filter((o) => o.is_current);
 }
 
+/** Finds one current observation by entity type + field name, from an
+ * already-fetched list — used to pull specific fields (e.g. "asset
+ * description") into a named card without a new query. */
+export function findCurrent(
+  observations: FieldObservation[],
+  entityType: FieldObservation["entity_type"],
+  fieldName: string,
+): FieldObservation | undefined {
+  return observations.find(
+    (o) => o.is_current && o.entity_type === entityType && o.field_name === fieldName,
+  );
+}
+
 export function historyFor(
   observations: FieldObservation[],
   obs: FieldObservation,
