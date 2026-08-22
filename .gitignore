@@ -38,3 +38,4 @@ ingestion/canara/canara_master.pdf
 .venv/
 .env
 ingestion/**/axis_master.pdf
+ingestion/**/*_master.pdf
