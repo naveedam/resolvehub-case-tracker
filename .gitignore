@@ -37,3 +37,4 @@ scrape_log.txt
 ingestion/canara/canara_master.pdf
 .venv/
 .env
+ingestion/**/axis_master.pdf
