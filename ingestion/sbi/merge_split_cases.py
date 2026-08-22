@@ -29,6 +29,7 @@ Env vars required: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import os
 import re
+import argparse
 from collections import defaultdict
 from supabase import create_client
 from dotenv import load_dotenv
@@ -62,16 +63,21 @@ def true_name(title: str) -> str:
     return current if current else title
 
 
-def fetch_all_sbi_cases() -> list[dict]:
-    """Paginated fetch so this works regardless of the project's Max Rows setting."""
+def fetch_cases_by_prefix(prefix: str = "SBI") -> list[dict]:
+    """Paginated fetch, filtered server-side by case_reference LIKE
+    '<prefix>-%' so this works for any bank's scraper output (SBI,
+    CANARA, AXIS, ...) rather than only SBI. Works regardless of the
+    project's Max Rows setting."""
     all_cases = []
     offset = 0
     page_size = 1000
+    like_pattern = f"{prefix}-%"
     while True:
         resp = (
             supabase.table("cases")
             .select("*")
             .is_("deleted_at", "null")
+            .like("case_reference", like_pattern)
             .range(offset, offset + page_size - 1)
             .execute()
         )
@@ -82,7 +88,7 @@ def fetch_all_sbi_cases() -> list[dict]:
         if len(batch) < page_size:
             break
         offset += page_size
-    return [c for c in all_cases if (c.get("metadata") or {}).get("source") == "SBI"]
+    return all_cases
 
 
 def build_merge_groups(cases: list[dict]) -> dict[tuple, list[dict]]:
@@ -115,14 +121,14 @@ def clean_standalone_titles(cases: list[dict], merge_groups: dict, dry_run: bool
     return len(dirty)
 
 
-def repair_titles_from_documents(dry_run: bool = True):
+def repair_titles_from_documents(dry_run: bool = True, prefix: str = "SBI"):
     """Recomputes every SBI case's title from its linked document's
     ORIGINAL document_name (never touched by any title-cleaning regex,
     past or present) and fixes any mismatch. This is the authoritative
     repair — it doesn't rely on remembering which specific cases a past
     bug affected, it just re-derives the truth from the untouched source."""
-    print("Fetching all SBI cases and their documents...")
-    cases = fetch_all_sbi_cases()
+    print(f"Fetching all {prefix} cases and their documents...")
+    cases = fetch_cases_by_prefix(prefix)
     case_by_id = {c["id"]: c for c in cases}
 
     all_docs = []
@@ -225,10 +231,10 @@ def merge_group_list(merge_groups: dict, dry_run: bool) -> int:
     return merged_count
 
 
-def run_exact_liability_merge(dry_run: bool = True):
-    print("Fetching all SBI cases...")
-    cases = fetch_all_sbi_cases()
-    print(f"  {len(cases)} total SBI cases")
+def run_exact_liability_merge(dry_run: bool = True, prefix: str = "SBI"):
+    print(f"Fetching all {prefix} cases...")
+    cases = fetch_cases_by_prefix(prefix)
+    print(f"  {len(cases)} total {prefix} cases")
 
     merge_groups = build_exact_liability_groups(cases)
     total_dupes = sum(len(v) - 1 for v in merge_groups.values())
@@ -245,10 +251,10 @@ def run_exact_liability_merge(dry_run: bool = True):
     print(f"\nDone. Merged {merged_count} groups, removed {total_dupes} duplicate case rows.")
 
 
-def run(dry_run: bool = True):
-    print("Fetching all SBI cases..." )
-    cases = fetch_all_sbi_cases()
-    print(f"  {len(cases)} total SBI cases")
+def run(dry_run: bool = True, prefix: str = "SBI"):
+    print(f"Fetching all {prefix} cases...")
+    cases = fetch_cases_by_prefix(prefix)
+    print(f"  {len(cases)} total {prefix} cases")
 
     merge_groups = build_merge_groups(cases)
     total_dupes = sum(len(v) - 1 for v in merge_groups.values())
@@ -310,4 +316,12 @@ def run(dry_run: bool = True):
 
 
 if __name__ == "__main__":
-    run(dry_run=True)  # flip to dry_run=False after reviewing the output
+    parser = argparse.ArgumentParser(
+        description="Merge duplicate/split cases for a given bank's case_reference prefix."
+    )
+    parser.add_argument(
+        "--prefix", default="SBI",
+        help="Case reference prefix to process, e.g. SBI, AXIS, CANARA (default: SBI)"
+    )
+    args = parser.parse_args()
+    run(dry_run=True, prefix=args.prefix)  # flip to dry_run=False after reviewing the output
