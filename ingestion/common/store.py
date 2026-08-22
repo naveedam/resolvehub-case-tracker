@@ -29,6 +29,15 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+class DuplicateIdentifierError(Exception):
+    """Raised by Store.insert_identifier when (entity_type, identifier_type,
+    identifier_value) already exists — mirrors the real unique constraint
+    on entity_identifiers. This is a distinct, expected condition (most
+    commonly: a network retry resent an INSERT that had already
+    succeeded server-side), not a generic failure — callers are meant to
+    catch it and re-resolve via find_identifier, not just propagate it."""
+
+
 # A page of 1000 case_ids in a single .in_("case_id", [...]) filter builds a
 # GET request URL with ~1000 UUIDs (~37KB of query string) — large enough
 # that PostgREST/the transport in front of it can reject it outright
@@ -42,6 +51,17 @@ IN_FILTER_CHUNK_SIZE = 200
 def _chunked(items: list, size: int):
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def _is_duplicate_key_error(e: Exception) -> bool:
+    """Detects a Postgres unique_violation (SQLSTATE 23505) surfaced
+    through postgrest's APIError, without a hard import dependency on
+    postgrest's exact exception shape — duck-typed on `.code` first,
+    falling back to the message text."""
+    if getattr(e, "code", None) == "23505":
+        return True
+    message = str(e)
+    return "23505" in message or "duplicate key value violates unique constraint" in message
 
 
 class Store(Protocol):
@@ -239,6 +259,16 @@ class InMemoryStore:
         return None
 
     def insert_identifier(self, identifier_row: dict) -> str:
+        for existing in self.identifiers.values():
+            if (
+                existing["entity_type"] == identifier_row["entity_type"]
+                and existing["identifier_type"] == identifier_row["identifier_type"]
+                and existing["identifier_value"] == identifier_row["identifier_value"]
+            ):
+                raise DuplicateIdentifierError(
+                    f"duplicate key: ({identifier_row['entity_type']}, "
+                    f"{identifier_row['identifier_type']}, {identifier_row['identifier_value']})"
+                )
         iid = new_id()
         self.identifiers[iid] = {"id": iid, **identifier_row}
         return iid
@@ -414,7 +444,12 @@ class SupabaseStore:
         return result.data[0] if result.data else None
 
     def insert_identifier(self, identifier_row: dict) -> str:
-        inserted = self._execute(self.sb.table("entity_identifiers").insert(identifier_row))
+        try:
+            inserted = self._execute(self.sb.table("entity_identifiers").insert(identifier_row))
+        except Exception as e:
+            if _is_duplicate_key_error(e):
+                raise DuplicateIdentifierError(str(e)) from e
+            raise
         return inserted.data[0]["id"]
 
     def insert_match_candidate(self, candidate_row: dict) -> str:

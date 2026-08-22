@@ -31,7 +31,7 @@ from datetime import date
 
 from ingestion.common.adapter import SourceAdapter
 from ingestion.common.models import EVENT_TRIGGER_FIELDS, FieldObservation, Identifier, NormalizedRecord
-from ingestion.common.store import Store
+from ingestion.common.store import DuplicateIdentifierError, Store
 
 
 @dataclass
@@ -304,34 +304,52 @@ def _display(prev_row: dict):
 def _reconcile_identifier(store: Store, *, entity_type: str, entity_id: str, ident: Identifier, source_id: str) -> None:
     existing = store.find_identifier(entity_type, ident.identifier_type, ident.identifier_value)
     if existing is not None:
-        if existing["entity_id"] == entity_id:
-            return  # already recorded, possibly by a different source — fine
-        store.insert_match_candidate(
-            {
-                "entity_type": entity_type,
-                "entity_id_a": existing["entity_id"],
-                "entity_id_b": entity_id,
-                "match_method": ident.match_method,
-                "confidence": ident.confidence,
-                "evidence": {
-                    "identifier_type": ident.identifier_type,
-                    "identifier_value": ident.identifier_value,
-                    "conflicting_source_id": source_id,
-                },
-                "status": "pending",
-            }
-        )
+        _resolve_identifier_conflict(store, entity_type=entity_type, entity_id=entity_id, ident=ident, source_id=source_id, existing=existing)
         return
 
-    store.insert_identifier(
+    try:
+        store.insert_identifier(
+            {
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "identifier_type": ident.identifier_type,
+                "identifier_value": ident.identifier_value,
+                "source_id": source_id,
+                "match_method": ident.match_method,
+                "confidence": ident.confidence,
+            }
+        )
+    except DuplicateIdentifierError:
+        # The row already exists despite find_identifier not seeing it a
+        # moment ago — most likely a network retry resent an insert that
+        # had already succeeded server-side (a long-running backfill hit
+        # exactly this in production: a transient timeout mid-response,
+        # after the write had already landed). Re-resolve against
+        # what's actually there now, exactly as if find_identifier had
+        # seen it the first time — this is not a new kind of conflict,
+        # just a delayed discovery of one.
+        existing_after_race = store.find_identifier(entity_type, ident.identifier_type, ident.identifier_value)
+        if existing_after_race is None:
+            raise  # genuinely inconsistent state — don't silently swallow
+        _resolve_identifier_conflict(store, entity_type=entity_type, entity_id=entity_id, ident=ident, source_id=source_id, existing=existing_after_race)
+
+
+def _resolve_identifier_conflict(store: Store, *, entity_type: str, entity_id: str, ident: Identifier, source_id: str, existing: dict) -> None:
+    if existing["entity_id"] == entity_id:
+        return  # already recorded, possibly by a different source — fine
+    store.insert_match_candidate(
         {
             "entity_type": entity_type,
-            "entity_id": entity_id,
-            "identifier_type": ident.identifier_type,
-            "identifier_value": ident.identifier_value,
-            "source_id": source_id,
+            "entity_id_a": existing["entity_id"],
+            "entity_id_b": entity_id,
             "match_method": ident.match_method,
             "confidence": ident.confidence,
+            "evidence": {
+                "identifier_type": ident.identifier_type,
+                "identifier_value": ident.identifier_value,
+                "conflicting_source_id": source_id,
+            },
+            "status": "pending",
         }
     )
 
