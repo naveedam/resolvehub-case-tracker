@@ -74,7 +74,7 @@ class Store(Protocol):
     # backfill — read legacy tables directly (paginated/batched; the
     # frontend's cases.ts fetchCases() bug taught this codebase why
     # every unbounded Supabase select must be paginated explicitly)
-    def list_cases_page(self, from_idx: int, to_idx: int) -> list[dict]: ...
+    def list_cases_page(self, from_idx: int, to_idx: int, case_reference_prefix: str | None = None) -> list[dict]: ...
     def list_liabilities_for_cases(self, case_ids: list[str]) -> list[dict]: ...
     def list_assets_for_cases(self, case_ids: list[str]) -> list[dict]: ...
     def list_documents_for_cases(self, case_ids: list[str]) -> list[dict]: ...
@@ -249,8 +249,10 @@ class InMemoryStore:
         return cid
 
     # -- backfill reads --
-    def list_cases_page(self, from_idx: int, to_idx: int) -> list[dict]:
+    def list_cases_page(self, from_idx: int, to_idx: int, case_reference_prefix: str | None = None) -> list[dict]:
         ordered = sorted(self.cases.values(), key=lambda c: c["id"])
+        if case_reference_prefix is not None:
+            ordered = [c for c in ordered if c["case_reference"].startswith(case_reference_prefix)]
         return ordered[from_idx : to_idx + 1]
 
     def list_liabilities_for_cases(self, case_ids: list[str]) -> list[dict]:
@@ -420,14 +422,15 @@ class SupabaseStore:
         return inserted.data[0]["id"]
 
     # -- backfill reads --
-    def list_cases_page(self, from_idx: int, to_idx: int) -> list[dict]:
-        result = self._execute(
+    def list_cases_page(self, from_idx: int, to_idx: int, case_reference_prefix: str | None = None) -> list[dict]:
+        query = (
             self.sb.table("cases")
             .select("id, case_reference, estimated_liability, filing_date, status, next_hearing_date")
             .is_("deleted_at", "null")
-            .order("id", desc=False)
-            .range(from_idx, to_idx)
         )
+        if case_reference_prefix is not None:
+            query = query.like("case_reference", f"{case_reference_prefix}%")
+        result = self._execute(query.order("id", desc=False).range(from_idx, to_idx))
         return result.data
 
     def list_liabilities_for_cases(self, case_ids: list[str]) -> list[dict]:

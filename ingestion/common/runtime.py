@@ -374,14 +374,29 @@ class BackfillSummary:
 def _infer_source_for_case_reference(case_reference: str) -> tuple[str, str, str]:
     """(name, full_name, source_type) for get_or_create_source, inferred
     from the case_reference prefix each adapter's make_case_reference()
-    already stamps on every case it creates. Reuses the SAME 'SBI'/
-    'Canara' source rows live ingestion uses — these observations
-    genuinely did come from those banks, just extracted by the
-    pre-Phase-1 scrapers before the evidence layer existed."""
+    already stamps on every case it creates. Reuses the SAME source row
+    live ingestion uses (get_or_create_source finds-or-creates by
+    `name`) — these observations genuinely did come from these banks,
+    just extracted by a scraper that predates (or, for AXIS/UNIONBANK,
+    runs outside of) the evidence layer.
+
+    NOTE for Axis/UnionBank: 'UnionBank'/'Union Bank of India' matches
+    the source_name/source_name_full already committed in
+    ingestion/union_bank/scraper.py, so a backfill run reuses that same
+    sources row rather than creating a duplicate. Axis has no adapter
+    committed to this repo at all (see chat context) — 'Axis'/'Axis
+    Bank' is a reasonable default, but if Axis ingestion already
+    registered a sources row under a different name out-of-band,
+    confirm and adjust before running against production to avoid a
+    duplicate source row."""
     if case_reference.startswith("SBI-"):
         return "SBI", "State Bank of India", "bank"
     if case_reference.startswith("CANARA-"):
         return "Canara", "Canara Bank", "bank"
+    if case_reference.startswith("AXIS-"):
+        return "Axis", "Axis Bank", "bank"
+    if case_reference.startswith("UNIONBANK-"):
+        return "UnionBank", "Union Bank of India", "bank"
     return "Legacy", "Legacy / unattributed import", "manual"
 
 
@@ -413,8 +428,18 @@ def _legacy_observation(entity_type: str, field_name: str, value, source_documen
 
 
 def backfill_resolution_profiles(
-    store: Store, *, page_size: int = BACKFILL_PAGE_SIZE, progress_every: int = 500
+    store: Store,
+    *,
+    page_size: int = BACKFILL_PAGE_SIZE,
+    progress_every: int = 500,
+    case_reference_prefixes: list[str] | None = None,
 ) -> BackfillSummary:
+    """case_reference_prefixes, when given, restricts this run to cases
+    whose case_reference starts with one of the given prefixes (e.g.
+    ["AXIS-", "UNIONBANK-"]) — every other existing case is not just
+    left unmodified but never even read or re-visited. None (the
+    default) processes every non-deleted case, exactly as before this
+    parameter existed."""
     start = time.monotonic()
     cases_processed = 0
     observations_written = 0
@@ -424,102 +449,105 @@ def backfill_resolution_profiles(
     run_ids: dict[str, str] = {}
     run_counts: dict[str, int] = {}
 
-    from_idx = 0
-    while True:
-        page = store.list_cases_page(from_idx, from_idx + page_size - 1)
-        if not page:
-            break
+    prefixes = case_reference_prefixes or [None]  # None -> one unfiltered pass over everything
 
-        case_ids = [c["id"] for c in page]
-        liabilities_by_case: dict[str, list[dict]] = {}
-        for liability in store.list_liabilities_for_cases(case_ids):
-            liabilities_by_case.setdefault(liability["case_id"], []).append(liability)
-        assets_by_case: dict[str, list[dict]] = {}
-        for asset in store.list_assets_for_cases(case_ids):
-            assets_by_case.setdefault(asset["case_id"], []).append(asset)
-        documents_by_case: dict[str, list[dict]] = {}
-        for doc in store.list_documents_for_cases(case_ids):
-            documents_by_case.setdefault(doc["case_id"], []).append(doc)
+    for prefix in prefixes:
+        from_idx = 0
+        while True:
+            page = store.list_cases_page(from_idx, from_idx + page_size - 1, case_reference_prefix=prefix)
+            if not page:
+                break
 
-        for case in page:
-            case_id = case["id"]
-            case_reference = case["case_reference"]
-            name, full_name, source_type = _infer_source_for_case_reference(case_reference)
+            case_ids = [c["id"] for c in page]
+            liabilities_by_case: dict[str, list[dict]] = {}
+            for liability in store.list_liabilities_for_cases(case_ids):
+                liabilities_by_case.setdefault(liability["case_id"], []).append(liability)
+            assets_by_case: dict[str, list[dict]] = {}
+            for asset in store.list_assets_for_cases(case_ids):
+                assets_by_case.setdefault(asset["case_id"], []).append(asset)
+            documents_by_case: dict[str, list[dict]] = {}
+            for doc in store.list_documents_for_cases(case_ids):
+                documents_by_case.setdefault(doc["case_id"], []).append(doc)
 
-            if name not in source_ids:
-                source_ids[name] = store.get_or_create_source(name, full_name, source_type)
-                run_ids[name] = store.start_run(source_ids[name])
-                run_counts[name] = 0
-            source_id = source_ids[name]
-            run_id = run_ids[name]
+            for case in page:
+                case_id = case["id"]
+                case_reference = case["case_reference"]
+                name, full_name, source_type = _infer_source_for_case_reference(case_reference)
 
-            documents = documents_by_case.get(case_id, [])
-            source_document_id = documents[0]["id"] if documents else None
+                if name not in source_ids:
+                    source_ids[name] = store.get_or_create_source(name, full_name, source_type)
+                    run_ids[name] = store.start_run(source_ids[name])
+                    run_counts[name] = 0
+                source_id = source_ids[name]
+                run_id = run_ids[name]
 
-            for field_name in _CASE_LEGACY_FIELDS:
-                obs = _legacy_observation("case", field_name, case.get(field_name), source_document_id)
-                if obs is None:
-                    continue
-                _reconcile_observation(
-                    store, entity_type="case", entity_id=case_id, obs=obs,
-                    source_id=source_id, run_id=run_id, case_id=case_id,
-                )
-                observations_written += 1
+                documents = documents_by_case.get(case_id, [])
+                source_document_id = documents[0]["id"] if documents else None
 
-            for liability in liabilities_by_case.get(case_id, []):
-                for field_name in _LIABILITY_LEGACY_FIELDS:
-                    obs = _legacy_observation("liability", field_name, liability.get(field_name), source_document_id)
+                for field_name in _CASE_LEGACY_FIELDS:
+                    obs = _legacy_observation("case", field_name, case.get(field_name), source_document_id)
                     if obs is None:
                         continue
                     _reconcile_observation(
-                        store, entity_type="liability", entity_id=liability["id"], obs=obs,
-                        source_id=source_id, run_id=run_id, case_id=case_id,
-                    )
-                    observations_written += 1
-                if liability.get("account_number"):
-                    _reconcile_identifier(
-                        store, entity_type="case", entity_id=case_id,
-                        ident=Identifier(
-                            entity_type="case", identifier_type="bank_account_ref",
-                            identifier_value=liability["account_number"],
-                        ),
-                        source_id=source_id,
-                    )
-                    identifier_reconciliations += 1
-
-            for asset in assets_by_case.get(case_id, []):
-                for field_name in _ASSET_LEGACY_FIELDS:
-                    obs = _legacy_observation("asset", field_name, asset.get(field_name), source_document_id)
-                    if obs is None:
-                        continue
-                    _reconcile_observation(
-                        store, entity_type="asset", entity_id=asset["id"], obs=obs,
+                        store, entity_type="case", entity_id=case_id, obs=obs,
                         source_id=source_id, run_id=run_id, case_id=case_id,
                     )
                     observations_written += 1
 
-            _reconcile_identifier(
-                store, entity_type="case", entity_id=case_id,
-                ident=Identifier(entity_type="case", identifier_type="case_reference", identifier_value=case_reference),
-                source_id=source_id,
-            )
-            identifier_reconciliations += 1
+                for liability in liabilities_by_case.get(case_id, []):
+                    for field_name in _LIABILITY_LEGACY_FIELDS:
+                        obs = _legacy_observation("liability", field_name, liability.get(field_name), source_document_id)
+                        if obs is None:
+                            continue
+                        _reconcile_observation(
+                            store, entity_type="liability", entity_id=liability["id"], obs=obs,
+                            source_id=source_id, run_id=run_id, case_id=case_id,
+                        )
+                        observations_written += 1
+                    if liability.get("account_number"):
+                        _reconcile_identifier(
+                            store, entity_type="case", entity_id=case_id,
+                            ident=Identifier(
+                                entity_type="case", identifier_type="bank_account_ref",
+                                identifier_value=liability["account_number"],
+                            ),
+                            source_id=source_id,
+                        )
+                        identifier_reconciliations += 1
 
-            cases_processed += 1
-            run_counts[name] += 1
-            by_source[name] = by_source.get(name, 0) + 1
+                for asset in assets_by_case.get(case_id, []):
+                    for field_name in _ASSET_LEGACY_FIELDS:
+                        obs = _legacy_observation("asset", field_name, asset.get(field_name), source_document_id)
+                        if obs is None:
+                            continue
+                        _reconcile_observation(
+                            store, entity_type="asset", entity_id=asset["id"], obs=obs,
+                            source_id=source_id, run_id=run_id, case_id=case_id,
+                        )
+                        observations_written += 1
 
-            if cases_processed % progress_every == 0:
-                elapsed = time.monotonic() - start
-                print(
-                    f"  ...{cases_processed} cases processed "
-                    f"({observations_written} observations, {identifier_reconciliations} identifier "
-                    f"reconciliations so far, {elapsed:.0f}s elapsed)"
+                _reconcile_identifier(
+                    store, entity_type="case", entity_id=case_id,
+                    ident=Identifier(entity_type="case", identifier_type="case_reference", identifier_value=case_reference),
+                    source_id=source_id,
                 )
+                identifier_reconciliations += 1
 
-        if len(page) < page_size:
-            break
-        from_idx += page_size
+                cases_processed += 1
+                run_counts[name] += 1
+                by_source[name] = by_source.get(name, 0) + 1
+
+                if cases_processed % progress_every == 0:
+                    elapsed = time.monotonic() - start
+                    print(
+                        f"  ...{cases_processed} cases processed "
+                        f"({observations_written} observations, {identifier_reconciliations} identifier "
+                        f"reconciliations so far, {elapsed:.0f}s elapsed)"
+                    )
+
+            if len(page) < page_size:
+                break
+            from_idx += page_size
 
     for name, run_id in run_ids.items():
         store.finish_run(
@@ -557,6 +585,20 @@ if __name__ == "__main__":
             "row. Safe to re-run — idempotent, same as live ingestion."
         ),
     )
+    parser.add_argument(
+        "--case-reference-prefix",
+        action="append",
+        dest="case_reference_prefixes",
+        metavar="PREFIX",
+        help=(
+            "Restrict the backfill to cases whose case_reference starts "
+            "with this prefix (e.g. AXIS-, UNIONBANK-). Repeatable — "
+            "pass it multiple times to cover several prefixes in one "
+            "run. Every other existing case is left completely "
+            "untouched, not just unmodified. Omit to process every "
+            "non-deleted case, exactly as before this flag existed."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.backfill_resolution_profiles:
@@ -567,8 +609,11 @@ if __name__ == "__main__":
     client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
     store = SupabaseStore(client)
 
-    print("Starting Resolution Profile backfill for all non-deleted cases...")
-    summary = backfill_resolution_profiles(store)
+    if args.case_reference_prefixes:
+        print(f"Starting Resolution Profile backfill for prefixes: {args.case_reference_prefixes} ...")
+    else:
+        print("Starting Resolution Profile backfill for all non-deleted cases...")
+    summary = backfill_resolution_profiles(store, case_reference_prefixes=args.case_reference_prefixes)
 
     print("\nBackfill complete.")
     print(f"  cases processed:            {summary.cases_processed}")
