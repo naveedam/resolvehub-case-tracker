@@ -16,7 +16,6 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Table,
   TableBody,
@@ -229,11 +228,19 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
     switch (stageIndex) {
       case 3:
         return caseDetail.case.status ?? "Legal proceeding";
-      case 2:
-        return (
-          auctionStatus?.value_text ??
-          (auctionDate ? `Scheduled ${formatDate(auctionDate.value_date)}` : "Auction pending")
-        );
+      case 2: {
+        // Legacy assets.auction_status occasionally contains "possessed"
+        // rather than a genuine auction-progress value (a vocabulary
+        // collision from the source data, not a fallback bug — there is
+        // no reference to possessionStatus anywhere in this branch).
+        // Showing "Auction: possessed" verbatim is misleading regardless
+        // of why the column holds that value, so treat it as
+        // uninformative for the Auction stage specifically.
+        const text = auctionStatus?.value_text?.trim();
+        const isPossessionWordedValue = text?.toLowerCase() === "possessed";
+        if (text && !isPossessionWordedValue) return text;
+        return auctionDate ? `Scheduled ${formatDate(auctionDate.value_date)}` : "Auction pending";
+      }
       case 1:
         return possessionStatus?.value_text ?? "Possession taken";
       default:
@@ -264,6 +271,90 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
     .map(([sourceId, obs]) => ({ source: sourcesById[sourceId], obs }))
     .filter((g): g is { source: Source; obs: FieldObservation[] } => !!g.source)
     .sort((a, b) => b.obs.length - a.obs.length);
+
+  const hasTimeline = events.length > 0;
+
+  const evidenceContent = (
+    <>
+      <p className="mb-3 mt-2 text-xs text-slate-500">
+        {sourceGroups.length === 0
+          ? "No sourced values yet."
+          : `Current values grouped by the ${sourceGroups.length} source${sourceGroups.length === 1 ? "" : "s"} that reported them.`}
+      </p>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {sourceGroups.map(({ source, obs }) => (
+          <Card key={source.id} className="shadow-none">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-slate-700">
+                  {source.full_name}
+                </CardTitle>
+                <Badge variant="outline" className="capitalize text-slate-500">
+                  {source.source_type}
+                </Badge>
+              </div>
+            </CardHeader>
+            <CardContent className="divide-y divide-slate-100">
+              {obs.map((o) => (
+                <div
+                  key={o.id}
+                  className="flex items-center justify-between py-1.5 text-sm first:pt-0 last:pb-0"
+                >
+                  <span className="capitalize text-slate-500">
+                    {o.field_name.replace(/_/g, " ")}
+                  </span>
+                  <span className="flex items-center gap-2 font-medium text-slate-800">
+                    {currentValue(o)}
+                    {historyFor(observations, o).length > 1 && (
+                      <span className="text-xs font-normal text-slate-400">
+                        ({historyFor(observations, o).length}×)
+                      </span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        ))}
+
+        <Card className="shadow-none">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-700">Identifiers</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {identifiers.length === 0 ? (
+              <p className="py-4 text-sm text-muted-foreground">
+                No authoritative identifiers (CIN, IBBI/NCLT reference, ...) linked yet.
+              </p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Value</TableHead>
+                    <TableHead>Match</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {identifiers.map((id) => (
+                    <TableRow key={id.id}>
+                      <TableCell className="font-medium capitalize">
+                        {id.identifier_type.replace(/_/g, " ")}
+                      </TableCell>
+                      <TableCell className="tabular-nums">{id.identifier_value}</TableCell>
+                      <TableCell className="capitalize text-muted-foreground">
+                        {id.match_method}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </>
+  );
 
   return (
     <Card className="mt-8 overflow-hidden">
@@ -351,80 +442,86 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
           </CardHeader>
           <CardContent>
             {hasLegalSchedule ? (
-              <Collapsible open={scheduleOpen} onOpenChange={setScheduleOpen}>
-                <p
-                  className={`text-sm text-slate-700 ${scheduleOpen ? "leading-relaxed" : "leading-relaxed line-clamp-4"}`}
-                >
+              <div>
+                <p className="line-clamp-4 text-sm leading-relaxed text-slate-700">
                   {assetSummarySentence || "Asset details recorded; see full schedule below."}
                 </p>
                 <div className="mt-2">
                   <SourceBadge obs={description ?? assetClassification} sourcesById={sourcesById} />
                 </div>
-                <CollapsibleTrigger asChild>
-                  <button
-                    className="mt-3 flex items-center gap-1 text-xs font-medium hover:underline"
-                    style={{ color: TEAL }}
-                  >
-                    <ChevronDown
-                      className={`h-3.5 w-3.5 transition-transform ${scheduleOpen ? "rotate-180" : ""}`}
-                    />
-                    {scheduleOpen ? "Hide" : "View"} complete legal schedule
-                  </button>
-                </CollapsibleTrigger>
-                <CollapsibleContent className="mt-4 space-y-3 rounded-md border border-slate-100 bg-slate-50/60 p-4 text-sm">
-                  {description && (
-                    <p className="leading-relaxed text-slate-700">{description.value_text}</p>
-                  )}
-                  <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
-                    {assetClassification && (
-                      <div className="flex justify-between gap-2 sm:block">
-                        <dt className="text-slate-500">Classification</dt>
-                        <dd className="font-medium text-slate-700">
-                          {assetClassification.value_text}
-                        </dd>
-                      </div>
+                <button
+                  type="button"
+                  aria-expanded={scheduleOpen}
+                  onClick={() => setScheduleOpen((v) => !v)}
+                  className="mt-3 flex items-center gap-1 text-xs font-medium hover:underline"
+                  style={{ color: TEAL }}
+                >
+                  <ChevronDown
+                    className={`h-3.5 w-3.5 transition-transform ${scheduleOpen ? "rotate-180" : ""}`}
+                  />
+                  {scheduleOpen ? "Hide" : "View"} complete legal schedule
+                </button>
+                {/* Plain conditional rendering, not Radix's CollapsibleContent —
+                    when scheduleOpen is false this subtree does not exist in the
+                    DOM at all, no CSS-hiding involved. */}
+                {scheduleOpen && (
+                  <div className="mt-4 space-y-3 rounded-md border border-slate-100 bg-slate-50/60 p-4 text-sm">
+                    {description && (
+                      <p className="leading-relaxed text-slate-700">{description.value_text}</p>
                     )}
-                    {possessionStatus && (
-                      <div className="flex justify-between gap-2 sm:block">
-                        <dt className="text-slate-500">Possession</dt>
-                        <dd className="font-medium text-slate-700">
-                          {possessionStatus.value_text}
-                        </dd>
-                      </div>
-                    )}
-                    {auctionStatus && (
-                      <div className="flex justify-between gap-2 sm:block">
-                        <dt className="text-slate-500">Auction status</dt>
-                        <dd className="font-medium text-slate-700">{auctionStatus.value_text}</dd>
-                      </div>
-                    )}
-                    {auctionDate && (
-                      <div className="flex justify-between gap-2 sm:block">
-                        <dt className="text-slate-500">Auction date</dt>
-                        <dd className="font-medium text-slate-700">
-                          {formatDate(auctionDate.value_date)}
-                        </dd>
-                      </div>
-                    )}
-                    {reservePrice && (
-                      <div className="flex justify-between gap-2 sm:block">
-                        <dt className="text-slate-500">Reserve price</dt>
-                        <dd className="font-medium text-slate-700">{currentValue(reservePrice)}</dd>
-                      </div>
-                    )}
-                    {(loanType || accountNumber) && (
-                      <div className="flex justify-between gap-2 sm:block">
-                        <dt className="text-slate-500">Loan</dt>
-                        <dd className="font-medium text-slate-700">
-                          {[loanType?.value_text, accountNumber?.value_text]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </dd>
-                      </div>
-                    )}
-                  </dl>
-                </CollapsibleContent>
-              </Collapsible>
+                    <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+                      {assetClassification && (
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-slate-500">Classification</dt>
+                          <dd className="font-medium text-slate-700">
+                            {assetClassification.value_text}
+                          </dd>
+                        </div>
+                      )}
+                      {possessionStatus && (
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-slate-500">Possession</dt>
+                          <dd className="font-medium text-slate-700">
+                            {possessionStatus.value_text}
+                          </dd>
+                        </div>
+                      )}
+                      {auctionStatus && (
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-slate-500">Auction status</dt>
+                          <dd className="font-medium text-slate-700">{auctionStatus.value_text}</dd>
+                        </div>
+                      )}
+                      {auctionDate && (
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-slate-500">Auction date</dt>
+                          <dd className="font-medium text-slate-700">
+                            {formatDate(auctionDate.value_date)}
+                          </dd>
+                        </div>
+                      )}
+                      {reservePrice && (
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-slate-500">Reserve price</dt>
+                          <dd className="font-medium text-slate-700">
+                            {currentValue(reservePrice)}
+                          </dd>
+                        </div>
+                      )}
+                      {(loanType || accountNumber) && (
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-slate-500">Loan</dt>
+                          <dd className="font-medium text-slate-700">
+                            {[loanType?.value_text, accountNumber?.value_text]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </dd>
+                        </div>
+                      )}
+                    </dl>
+                  </div>
+                )}
+              </div>
             ) : (
               <p className="text-sm text-muted-foreground">No asset details recorded yet.</p>
             )}
@@ -448,16 +545,14 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
         </Card>
 
         {/* ---------- Timeline / Evidence ---------- */}
-        <Tabs defaultValue="timeline">
-          <TabsList>
-            <TabsTrigger value="timeline">Timeline ({events.length})</TabsTrigger>
-            <TabsTrigger value="evidence">Evidence ({sourceGroups.length})</TabsTrigger>
-          </TabsList>
+        {hasTimeline ? (
+          <Tabs defaultValue="timeline">
+            <TabsList>
+              <TabsTrigger value="timeline">Timeline ({events.length})</TabsTrigger>
+              <TabsTrigger value="evidence">Evidence ({sourceGroups.length})</TabsTrigger>
+            </TabsList>
 
-          <TabsContent value="timeline">
-            {events.length === 0 ? (
-              <p className="py-6 text-sm text-muted-foreground">No tracked changes yet.</p>
-            ) : (
+            <TabsContent value="timeline">
               <ol className="relative mt-4 space-y-5 border-l-2 border-slate-200 pl-6">
                 {events.map((event) => {
                   const eventSource = event.source_id ? sourcesById[event.source_id] : undefined;
@@ -489,89 +584,21 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
                   );
                 })}
               </ol>
-            )}
-          </TabsContent>
+            </TabsContent>
 
-          <TabsContent value="evidence">
-            <p className="mb-3 mt-2 text-xs text-slate-500">
-              {sourceGroups.length === 0
-                ? "No sourced values yet."
-                : `Current values grouped by the ${sourceGroups.length} source${sourceGroups.length === 1 ? "" : "s"} that reported them.`}
+            <TabsContent value="evidence">{evidenceContent}</TabsContent>
+          </Tabs>
+        ) : (
+          // No timeline events at all: skip the tab chrome entirely
+          // rather than showing a single-item tab list or a "No tracked
+          // changes yet" placeholder — just the Evidence content.
+          <div>
+            <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+              Evidence ({sourceGroups.length})
             </p>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {sourceGroups.map(({ source, obs }) => (
-                <Card key={source.id} className="shadow-none">
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-medium text-slate-700">
-                        {source.full_name}
-                      </CardTitle>
-                      <Badge variant="outline" className="capitalize text-slate-500">
-                        {source.source_type}
-                      </Badge>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="divide-y divide-slate-100">
-                    {obs.map((o) => (
-                      <div
-                        key={o.id}
-                        className="flex items-center justify-between py-1.5 text-sm first:pt-0 last:pb-0"
-                      >
-                        <span className="capitalize text-slate-500">
-                          {o.field_name.replace(/_/g, " ")}
-                        </span>
-                        <span className="flex items-center gap-2 font-medium text-slate-800">
-                          {currentValue(o)}
-                          {historyFor(observations, o).length > 1 && (
-                            <span className="text-xs font-normal text-slate-400">
-                              ({historyFor(observations, o).length}×)
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              ))}
-
-              <Card className="shadow-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium text-slate-700">Identifiers</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {identifiers.length === 0 ? (
-                    <p className="py-4 text-sm text-muted-foreground">
-                      No authoritative identifiers (CIN, IBBI/NCLT reference, ...) linked yet.
-                    </p>
-                  ) : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Type</TableHead>
-                          <TableHead>Value</TableHead>
-                          <TableHead>Match</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {identifiers.map((id) => (
-                          <TableRow key={id.id}>
-                            <TableCell className="font-medium capitalize">
-                              {id.identifier_type.replace(/_/g, " ")}
-                            </TableCell>
-                            <TableCell className="tabular-nums">{id.identifier_value}</TableCell>
-                            <TableCell className="capitalize text-muted-foreground">
-                              {id.match_method}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-          </TabsContent>
-        </Tabs>
+            {evidenceContent}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
