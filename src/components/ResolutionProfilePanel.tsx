@@ -218,6 +218,29 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
       (caseDetail.case.case_type ?? "").toUpperCase().includes("NCLT"),
   });
 
+  // The subtitle (KPI card AND the journey caption below the stepper)
+  // must always describe the SAME stage stageIndex picked for the
+  // highlighted step — not whichever field happens to be non-null
+  // first. auction_date and possession_status can both legitimately
+  // exist at once (an asset can be possessed AND now scheduled for
+  // auction), so a generic fallback chain would silently borrow text
+  // from an earlier stage instead of the one actually shown as active.
+  const stageSubtitle = ((): string => {
+    switch (stageIndex) {
+      case 3:
+        return caseDetail.case.status ?? "Legal proceeding";
+      case 2:
+        return (
+          auctionStatus?.value_text ??
+          (auctionDate ? `Scheduled ${formatDate(auctionDate.value_date)}` : "Auction pending")
+        );
+      case 1:
+        return possessionStatus?.value_text ?? "Possession taken";
+      default:
+        return caseDetail.case.status ?? "Notice issued";
+    }
+  })();
+
   const assetSummarySentence = [description?.value_text, assetClassification?.value_text]
     .filter(Boolean)
     .join(" — ");
@@ -254,7 +277,7 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
       </CardHeader>
       <CardContent className="space-y-6">
         {/* ---------- Executive snapshot: 4 KPI cards, 5-second scan ---------- */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           <KpiCard icon={Banknote} label="Outstanding liability">
             {liabilityHeadline ? (
               <>
@@ -289,19 +312,16 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
             <p className="text-sm font-semibold" style={{ color: TEAL_DARK }}>
               {STAGES[stageIndex]?.label ?? "Notice"}
             </p>
-            <p className="text-xs text-slate-500">
-              {auctionStatus?.value_text ??
-                possessionStatus?.value_text ??
-                caseDetail.case.status ??
-                "In progress"}
-            </p>
+            <p className="text-xs text-slate-500">{stageSubtitle}</p>
           </KpiCard>
 
           <KpiCard icon={User} label="Borrower">
             <p className="text-sm font-semibold leading-snug text-slate-800">
               {caseDetail.case.title}
             </p>
-            <p className="text-xs text-slate-500">{caseDetail.case.case_reference}</p>
+            {caseDetail.case.case_type && (
+              <p className="text-xs text-slate-500">{caseDetail.case.case_type}</p>
+            )}
           </KpiCard>
         </div>
 
@@ -312,7 +332,11 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
             <span className="normal-case text-slate-400">— inferred from available signals</span>
           </p>
           <RecoveryJourney currentIndex={stageIndex} />
-          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-500">
+          <p className="mt-4 text-sm font-medium" style={{ color: TEAL_DARK }}>
+            {STAGES[stageIndex]?.label ?? "Notice"}:{" "}
+            <span className="font-normal text-slate-600">{stageSubtitle}</span>
+          </p>
+          <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-500">
             {npaDate && <span>NPA: {formatDate(npaDate.value_date)}</span>}
             {auctionDate && <span>Auction date: {formatDate(auctionDate.value_date)}</span>}
             {nextHearing && <span>Next hearing: {formatDate(nextHearing.value_date)}</span>}
@@ -328,10 +352,14 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
           <CardContent>
             {hasLegalSchedule ? (
               <Collapsible open={scheduleOpen} onOpenChange={setScheduleOpen}>
-                <p className="text-sm leading-snug text-slate-700">
+                <p
+                  className={`text-sm text-slate-700 ${scheduleOpen ? "leading-relaxed" : "leading-relaxed line-clamp-4"}`}
+                >
                   {assetSummarySentence || "Asset details recorded; see full schedule below."}
                 </p>
-                <SourceBadge obs={description ?? assetClassification} sourcesById={sourcesById} />
+                <div className="mt-2">
+                  <SourceBadge obs={description ?? assetClassification} sourcesById={sourcesById} />
+                </div>
                 <CollapsibleTrigger asChild>
                   <button
                     className="mt-3 flex items-center gap-1 text-xs font-medium hover:underline"
@@ -343,48 +371,56 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
                     {scheduleOpen ? "Hide" : "View"} complete legal schedule
                   </button>
                 </CollapsibleTrigger>
-                <CollapsibleContent className="mt-3 space-y-2 border-t border-slate-100 pt-3 text-sm">
-                  {description && <p className="text-slate-700">{description.value_text}</p>}
-                  <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                <CollapsibleContent className="mt-4 space-y-3 rounded-md border border-slate-100 bg-slate-50/60 p-4 text-sm">
+                  {description && (
+                    <p className="leading-relaxed text-slate-700">{description.value_text}</p>
+                  )}
+                  <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
                     {assetClassification && (
-                      <>
+                      <div className="flex justify-between gap-2 sm:block">
                         <dt className="text-slate-500">Classification</dt>
-                        <dd className="text-slate-700">{assetClassification.value_text}</dd>
-                      </>
+                        <dd className="font-medium text-slate-700">
+                          {assetClassification.value_text}
+                        </dd>
+                      </div>
                     )}
                     {possessionStatus && (
-                      <>
+                      <div className="flex justify-between gap-2 sm:block">
                         <dt className="text-slate-500">Possession</dt>
-                        <dd className="text-slate-700">{possessionStatus.value_text}</dd>
-                      </>
+                        <dd className="font-medium text-slate-700">
+                          {possessionStatus.value_text}
+                        </dd>
+                      </div>
                     )}
                     {auctionStatus && (
-                      <>
+                      <div className="flex justify-between gap-2 sm:block">
                         <dt className="text-slate-500">Auction status</dt>
-                        <dd className="text-slate-700">{auctionStatus.value_text}</dd>
-                      </>
+                        <dd className="font-medium text-slate-700">{auctionStatus.value_text}</dd>
+                      </div>
                     )}
                     {auctionDate && (
-                      <>
+                      <div className="flex justify-between gap-2 sm:block">
                         <dt className="text-slate-500">Auction date</dt>
-                        <dd className="text-slate-700">{formatDate(auctionDate.value_date)}</dd>
-                      </>
+                        <dd className="font-medium text-slate-700">
+                          {formatDate(auctionDate.value_date)}
+                        </dd>
+                      </div>
                     )}
                     {reservePrice && (
-                      <>
+                      <div className="flex justify-between gap-2 sm:block">
                         <dt className="text-slate-500">Reserve price</dt>
-                        <dd className="text-slate-700">{currentValue(reservePrice)}</dd>
-                      </>
+                        <dd className="font-medium text-slate-700">{currentValue(reservePrice)}</dd>
+                      </div>
                     )}
                     {(loanType || accountNumber) && (
-                      <>
+                      <div className="flex justify-between gap-2 sm:block">
                         <dt className="text-slate-500">Loan</dt>
-                        <dd className="text-slate-700">
+                        <dd className="font-medium text-slate-700">
                           {[loanType?.value_text, accountNumber?.value_text]
                             .filter(Boolean)
                             .join(" · ")}
                         </dd>
-                      </>
+                      </div>
                     )}
                   </dl>
                 </CollapsibleContent>
@@ -415,14 +451,14 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
         <Tabs defaultValue="timeline">
           <TabsList>
             <TabsTrigger value="timeline">Timeline ({events.length})</TabsTrigger>
-            <TabsTrigger value="evidence">Evidence</TabsTrigger>
+            <TabsTrigger value="evidence">Evidence ({sourceGroups.length})</TabsTrigger>
           </TabsList>
 
           <TabsContent value="timeline">
             {events.length === 0 ? (
               <p className="py-6 text-sm text-muted-foreground">No tracked changes yet.</p>
             ) : (
-              <ol className="relative mt-2 space-y-6 border-l-2 border-slate-200 pl-6">
+              <ol className="relative mt-4 space-y-5 border-l-2 border-slate-200 pl-6">
                 {events.map((event) => {
                   const eventSource = event.source_id ? sourcesById[event.source_id] : undefined;
                   return (
@@ -431,22 +467,24 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
                         className="absolute -left-[31px] top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full ring-4 ring-white"
                         style={{ backgroundColor: TEAL }}
                       />
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                          {formatDate(event.event_date)}
-                        </span>
-                        {eventSource && (
-                          <Badge
-                            variant="outline"
-                            className="border-slate-200 text-xs text-slate-600"
-                          >
-                            {eventSource.name}
-                          </Badge>
-                        )}
+                      <div className="rounded-md border border-slate-100 bg-white p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                            {formatDate(event.event_date)}
+                          </span>
+                          {eventSource && (
+                            <Badge
+                              variant="outline"
+                              className="border-slate-200 text-xs text-slate-600"
+                            >
+                              {eventSource.name}
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-1 text-sm font-medium text-slate-800">
+                          {event.description ?? event.event_type}
+                        </p>
                       </div>
-                      <p className="mt-0.5 text-sm font-medium text-slate-800">
-                        {event.description ?? event.event_type}
-                      </p>
                     </li>
                   );
                 })}
@@ -455,40 +493,46 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
           </TabsContent>
 
           <TabsContent value="evidence">
-            <div className="mt-2 grid grid-cols-1 gap-4 md:grid-cols-2">
-              {sourceGroups.length === 0 ? (
-                <p className="py-6 text-sm text-muted-foreground">No sourced values yet.</p>
-              ) : (
-                sourceGroups.map(({ source, obs }) => (
-                  <Card key={source.id} className="shadow-none">
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-sm font-medium text-slate-700">
-                          {source.full_name}
-                        </CardTitle>
-                        <Badge variant="outline" className="capitalize text-slate-500">
-                          {source.source_type}
-                        </Badge>
+            <p className="mb-3 mt-2 text-xs text-slate-500">
+              {sourceGroups.length === 0
+                ? "No sourced values yet."
+                : `Current values grouped by the ${sourceGroups.length} source${sourceGroups.length === 1 ? "" : "s"} that reported them.`}
+            </p>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              {sourceGroups.map(({ source, obs }) => (
+                <Card key={source.id} className="shadow-none">
+                  <CardHeader className="pb-2">
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="text-sm font-medium text-slate-700">
+                        {source.full_name}
+                      </CardTitle>
+                      <Badge variant="outline" className="capitalize text-slate-500">
+                        {source.source_type}
+                      </Badge>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="divide-y divide-slate-100">
+                    {obs.map((o) => (
+                      <div
+                        key={o.id}
+                        className="flex items-center justify-between py-1.5 text-sm first:pt-0 last:pb-0"
+                      >
+                        <span className="capitalize text-slate-500">
+                          {o.field_name.replace(/_/g, " ")}
+                        </span>
+                        <span className="flex items-center gap-2 font-medium text-slate-800">
+                          {currentValue(o)}
+                          {historyFor(observations, o).length > 1 && (
+                            <span className="text-xs font-normal text-slate-400">
+                              ({historyFor(observations, o).length}×)
+                            </span>
+                          )}
+                        </span>
                       </div>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      {obs.map((o) => (
-                        <div key={o.id} className="flex items-center justify-between text-sm">
-                          <span className="text-slate-500">{o.field_name.replace(/_/g, " ")}</span>
-                          <span className="flex items-center gap-2 font-medium text-slate-800">
-                            {currentValue(o)}
-                            {historyFor(observations, o).length > 1 && (
-                              <span className="text-xs font-normal text-slate-400">
-                                ({historyFor(observations, o).length}×)
-                              </span>
-                            )}
-                          </span>
-                        </div>
-                      ))}
-                    </CardContent>
-                  </Card>
-                ))
-              )}
+                    ))}
+                  </CardContent>
+                </Card>
+              ))}
 
               <Card className="shadow-none">
                 <CardHeader className="pb-2">
@@ -511,7 +555,9 @@ export function ResolutionProfilePanel({ caseDetail }: { caseDetail: CaseDetail 
                       <TableBody>
                         {identifiers.map((id) => (
                           <TableRow key={id.id}>
-                            <TableCell className="font-medium">{id.identifier_type}</TableCell>
+                            <TableCell className="font-medium capitalize">
+                              {id.identifier_type.replace(/_/g, " ")}
+                            </TableCell>
                             <TableCell className="tabular-nums">{id.identifier_value}</TableCell>
                             <TableCell className="capitalize text-muted-foreground">
                               {id.match_method}
