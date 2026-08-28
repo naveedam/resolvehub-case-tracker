@@ -19,7 +19,14 @@ import {
   drtProfilesQueryOptions,
   formatCurrency,
 } from "@/lib/cases";
-
+import {
+  casesQueryOptions,
+  dashboardStatsQueryOptions,
+  upcomingHearingsQueryOptions,
+  legacyCasesQueryOptions,
+  drtProfilesQueryOptions,
+  formatCurrency,
+} from "@/lib/cases";
 export const Route = createFileRoute("/")({
   loader: ({ context }) => {
     return Promise.all([
@@ -41,7 +48,7 @@ export const Route = createFileRoute("/")({
 });
 
 function Dashboard() {
-  const { data: stats } = useSuspenseQuery(dashboardStatsQueryOptions());
+  const { data: drtCases } = useSuspenseQuery(casesQueryOptions());
   const { data: hearings } = useSuspenseQuery(upcomingHearingsQueryOptions());
   const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
   const { data: drtProfiles } = useSuspenseQuery(drtProfilesQueryOptions());
@@ -72,9 +79,11 @@ function Dashboard() {
       icon: ShieldCheck,
     },
     {
-      label: "Live DRT Proceedings",
-      value: stats.total_cases.toLocaleString(),
-      icon: Scale,
+      {
+  label: "Live DRT Proceedings",
+  value: drtCases.length.toLocaleString(),
+  icon: Scale,
+},
     },
     {
       label: "Upcoming Hearings",
