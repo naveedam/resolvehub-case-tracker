@@ -2,8 +2,8 @@ import { useMemo } from "react";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import {
-  Bank,
   FolderOpen,
+  Landmark,
   Scale,
   ShieldCheck,
   CalendarClock,
@@ -48,7 +48,7 @@ function Dashboard() {
     {
       label: "Bank Ingestion Cases",
       value: bankCases.length.toLocaleString(),
-      icon: Bank,
+      icon: Landmark,
     },
     {
       label: "DRT Ingestion Cases",
