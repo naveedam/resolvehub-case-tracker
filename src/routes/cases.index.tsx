@@ -80,20 +80,28 @@ function CasesPage() {
   );
 
   const rows = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return cases
-      .filter((c) => (caseType === ALL ? true : c.case_type === caseType))
-      .filter((c) => (status === ALL ? true : c.status === status))
-      .filter((c) =>
-        ticketSize === ALL ? true : classifyTicketSize(c.estimated_liability) === ticketSize,
-      )
-      ..filter((c) =>
-  term
-    ? (c.display_title ?? c.title).toLowerCase().includes(term) ||
-      (c.borrower_name ?? "").toLowerCase().includes(term) ||
-      c.case_reference.toLowerCase().includes(term)
-    : true,
-)
+  const term = search.trim().toLowerCase();
+
+  return cases
+    .filter((c) => (caseType === ALL ? true : c.case_type === caseType))
+    .filter((c) => (status === ALL ? true : c.status === status))
+    .filter((c) =>
+      ticketSize === ALL
+        ? true
+        : classifyTicketSize(c.estimated_liability) === ticketSize,
+    )
+    .filter((c) =>
+      term
+        ? (c.display_title ?? c.title).toLowerCase().includes(term) ||
+          (c.borrower_name ?? "").toLowerCase().includes(term) ||
+          c.case_reference.toLowerCase().includes(term)
+        : true,
+    )
+    .sort((a, b) => {
+      const diff = (a.estimated_liability ?? 0) - (b.estimated_liability ?? 0);
+      return sortDesc ? -diff : diff;
+    });
+}, [cases, search, caseType, status, ticketSize, sortDesc]);
       )
       .sort((a, b) => {
         const diff = (a.estimated_liability ?? 0) - (b.estimated_liability ?? 0);
