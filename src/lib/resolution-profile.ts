@@ -7,9 +7,12 @@ import type {
   CaseEvent,
   EntityIdentifier,
   Source,
+  Confidence,
 } from "./types";
 
-async function fetchResolutionProfile(caseDetail: CaseDetail): Promise<ResolutionProfile> {
+async function fetchResolutionProfile(
+  caseDetail: CaseDetail,
+): Promise<ResolutionProfile> {
   const caseId = caseDetail.case.id;
 
   const [{ data: observations }, { data: events }, { data: identifiers }] =
@@ -35,24 +38,19 @@ async function fetchResolutionProfile(caseDetail: CaseDetail): Promise<Resolutio
     ]);
 
   const sourceIds = Array.from(
-    new Set([
-      ...(observations ?? []).map((o) => o.source_id),
-      ...(events ?? [])
-        .map((e) => e.source_id)
-        .filter(Boolean) as string[],
-      ...(identifiers ?? []).map((i) => i.source_id),
-    ]),
+    new Set((observations ?? []).map((o) => o.source_id).filter(Boolean)),
   );
 
-  const { data: sources } =
-    sourceIds.length === 0
-      ? { data: [] }
-      : await supabase.from("sources").select("*").in("id", sourceIds);
+  let sourcesById: Record<string, Source> = {};
 
-  const sourcesById: Record<string, Source> = {};
-  (sources ?? []).forEach((s) => {
-    sourcesById[s.id] = s;
-  });
+  if (sourceIds.length) {
+    const { data: sources } = await supabase
+      .from("sources")
+      .select("*")
+      .in("id", sourceIds);
+
+    sourcesById = Object.fromEntries((sources ?? []).map((s) => [s.id, s]));
+  }
 
   return {
     observations: (observations ?? []) as FieldObservation[],
@@ -67,3 +65,39 @@ export const resolutionProfileQueryOptions = (caseDetail: CaseDetail) =>
     queryKey: ["resolution-profile", caseDetail.case.id],
     queryFn: () => fetchResolutionProfile(caseDetail),
   });
+
+export const CONFIDENCE_LABEL: Record<Confidence, string> = {
+  verified: "Verified",
+  source_derived: "Source derived",
+  inferred: "Inferred",
+};
+
+export function currentObservations(
+  profile: ResolutionProfile,
+  field: string,
+): FieldObservation[] {
+  return profile.observations.filter((o) => o.field_name === field);
+}
+
+export function findCurrent(
+  profile: ResolutionProfile,
+  field: string,
+): FieldObservation | undefined {
+  return currentObservations(profile, field)[0];
+}
+
+export function currentValue(
+  profile: ResolutionProfile,
+  field: string,
+): string | number | null {
+  const obs = findCurrent(profile, field);
+  if (!obs) return null;
+  return obs.value_text ?? obs.value_numeric ?? obs.value_date ?? null;
+}
+
+export function historyFor(
+  profile: ResolutionProfile,
+  field: string,
+): FieldObservation[] {
+  return profile.observations.filter((o) => o.field_name === field);
+}
