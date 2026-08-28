@@ -74,7 +74,7 @@ async function fetchDrtProfiles(): Promise<any[]> {
   return fetchAllRows<any>((from, to) =>
     supabase
       .from("drt_profiles")
-      .select("id,case_id")
+      .select("case_id")
       .range(from, to),
   );
 }
