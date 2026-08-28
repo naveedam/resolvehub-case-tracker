@@ -87,12 +87,13 @@ function CasesPage() {
       .filter((c) =>
         ticketSize === ALL ? true : classifyTicketSize(c.estimated_liability) === ticketSize,
       )
-      .filter((c) =>
-        term
-          ? c.title.toLowerCase().includes(term) ||
-            (c.borrower_name ?? "").toLowerCase().includes(term) ||
-            c.case_reference.toLowerCase().includes(term)
-          : true,
+      ..filter((c) =>
+  term
+    ? (c.display_title ?? c.title).toLowerCase().includes(term) ||
+      (c.borrower_name ?? "").toLowerCase().includes(term) ||
+      c.case_reference.toLowerCase().includes(term)
+    : true,
+)
       )
       .sort((a, b) => {
         const diff = (a.estimated_liability ?? 0) - (b.estimated_liability ?? 0);
@@ -192,7 +193,7 @@ function CasesPage() {
                 <TableRow key={c.id}>
                   <TableCell className="font-medium">
                     <Link to="/cases/$caseId" params={{ caseId: c.id }} className="hover:underline">
-                      {c.title}
+                      {c.display_title ?? c.title}
                     </Link>
                   </TableCell>
                   <TableCell>{c.borrower_name ?? "—"}</TableCell>
