@@ -33,52 +33,72 @@ def load_webarchive(path: str) -> str:
     return data.decode("utf-8", errors="ignore")
 
 
-def parse(path: str):
+
+def parse(path):
     html = load_webarchive(path)
     soup = BeautifulSoup(html, "html.parser")
 
-    tables = soup.find_all("table")
-    if not tables:
-        raise ValueError("No table found")
-
-    # Largest table is the Party-wise report
-    table = max(tables, key=lambda t: len(t.find_all("tr")))
-    rows = table.find_all("tr")
-
-    headers = [_clean(th.get_text()).lower() for th in rows[0].find_all(["th", "td"])]
+    tribunal = soup.find(string=re.compile("DEBTS RECOVERY TRIBUNAL", re.I))
+    tribunal = tribunal.strip() if tribunal else "DRT"
 
     cases = []
 
-    for tr in rows[1:]:
-        cols = [_clean(td.get_text()) for td in tr.find_all("td")]
-
-        if len(cols) < len(headers):
+    for tr in soup.find_all("tr"):
+        tds = tr.find_all("td")
+        if len(tds) < 7:
             continue
 
-        row = dict(zip(headers, cols))
+        cells = [_clean(td.get_text(" ", strip=True)) for td in tds]
 
-        applicant = ""
-        respondent = ""
+        if len(cells) > 1 and "Applicant vs Respondent" in cells[1]:
+            continue
 
-        party_text = row.get("applicant vs respondent", "")
-        if " vs " in party_text.lower():
-            parts = re.split(r"\bvs\b", party_text, flags=re.IGNORECASE)
-            applicant = _clean(parts[0])
-            respondent = _clean(parts[1])
+        party_text = cells[1]
+        parts = re.split(r"\bvs\b", party_text, flags=re.I)
 
-        cases.append(
-            {
-                "tribunal": "Debts Recovery Tribunal - Bangalore (DRT-1)",
-                "case_number": row.get("case no.") or row.get("case no"),
-                "case_type": row.get("case type"),
-                "diary_number": row.get("diary no.") or row.get("diary no"),
-                "filing_date": _parse_date(row.get("date of filing")),
-                "applicant": applicant,
-                "respondent": respondent,
-                "applicant_advocate": row.get("applicant's advocate"),
-                "respondent_advocate": row.get("respondent's advocate") or None,
-                "status": "pending",
-            }
-        )
+        if len(parts) == 2:
+            applicant = parts[0].strip()
+            respondent = parts[1].strip()
+        else:
+            applicant = party_text
+            respondent = ""
+
+        case_number = None
+
+        for td in tds:
+            txt = _clean(td.get_text(" ", strip=True))
+            m = re.search(
+                r"\b(OA|SA|TA|IA|RA|RC)\s*/\s*(\d+)\s*/\s*(\d{4})\b",
+                txt,
+                re.I,
+            )
+            if m:
+                case_number = f"{m.group(1).upper()}/{m.group(2)}/{m.group(3)}"
+                break
+
+        if not case_number:
+            raw = str(tr)
+            m = re.search(
+                r"\b(OA|SA|TA|IA|RA|RC)\s*/\s*(\d+)\s*/\s*(\d{4})\b",
+                raw,
+                re.I,
+            )
+            if m:
+                case_number = f"{m.group(1).upper()}/{m.group(2)}/{m.group(3)}"
+
+        filing_date = _parse_date(cells[5])
+
+        cases.append({
+            "tribunal": tribunal,
+            "case_number": case_number,
+            "case_type": cells[3].upper(),
+            "diary_number": cells[4],
+            "filing_date": filing_date,
+            "applicant": applicant.upper(),
+            "respondent": respondent.upper(),
+            "applicant_advocate": cells[6].upper() if len(cells) > 6 else None,
+            "respondent_advocate": cells[7].upper() if len(cells) > 7 else None,
+            "status": "Pending",
+        })
 
     return cases

@@ -14,7 +14,6 @@ Env vars required: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import os
 import re
-import sys
 from supabase import create_client
 from dotenv import load_dotenv
 
@@ -138,24 +137,16 @@ def ingest(fields: dict, tribunal_short: str = "BLR1"):
 
 
 def run():
-    import time
-    import httpx
+    html_path = "sample/DRT1_SBI.webarchive"
 
-    html_path = sys.argv[1] if len(sys.argv) > 1 else "sample/DRT1_SBI.webarchive"
     cases = drt_parser.parse(html_path)
 
     print(f"Parsed {len(cases)} cases\n")
 
-    for i, case in enumerate(cases, start=1):
-        while True:
-            try:
-                ingest(case)
-                break
-            except httpx.RemoteProtocolError:
-                print(f"[{i}/{len(cases)}] Connection reset - retrying...")
-                time.sleep(2)
+    for case in cases:
+        ingest(case)
 
-    print("Done.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":
