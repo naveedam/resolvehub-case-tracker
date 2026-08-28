@@ -1,112 +1,74 @@
 import { useMemo } from "react";
-import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { useSuspenseQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
 import {
-  Briefcase,
-  CalendarClock,
+  Bank,
   FolderOpen,
-  Gavel,
-  Landmark,
+  Scale,
   ShieldCheck,
+  CalendarClock,
+  IndianRupee,
 } from "lucide-react";
 
 import { PageHeader } from "@/components/AppShell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  casesQueryOptions,
-  formatDate,
+  dashboardStatsQueryOptions,
+  upcomingHearingsQueryOptions,
+  legacyCasesQueryOptions,
+  drtProfilesQueryOptions,
+  formatCurrency,
 } from "@/lib/cases";
-import { supabase } from "@/lib/supabase";
-
-const dashboardCountsQuery = queryOptions({
-  queryKey: ["dashboard-counts"],
-  queryFn: async () => {
-    const [
-      { count: bankCases, error: bankErr },
-      { count: drtProfiles, error: drtErr },
-    ] = await Promise.all([
-      supabase
-        .from("cases")
-        .select("*", { count: "exact", head: true }),
-      supabase
-        .from("drt_profiles")
-        .select("*", { count: "exact", head: true }),
-    ]);
-
-    if (bankErr) throw bankErr;
-    if (drtErr) throw drtErr;
-
-    return {
-      bankCases: bankCases ?? 0,
-      drtProfiles: drtProfiles ?? 0,
-      totalCases: (bankCases ?? 0) + (drtProfiles ?? 0),
-    };
-  },
-});
 
 export const Route = createFileRoute("/")({
-  loader: ({ context }) => {
-    context.queryClient.ensureQueryData(dashboardCountsQuery);
-    context.queryClient.ensureQueryData(casesQueryOptions());
-  },
   component: Dashboard,
 });
 
 function Dashboard() {
-  const { data: counts } = useSuspenseQuery(dashboardCountsQuery);
-  const { data: drtCases } = useSuspenseQuery(casesQueryOptions());
+  const { data: stats } = useSuspenseQuery(dashboardStatsQueryOptions());
+  const { data: hearings } = useSuspenseQuery(upcomingHearingsQueryOptions());
+  const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
+  const { data: drtProfiles } = useSuspenseQuery(drtProfilesQueryOptions());
 
-  const upcomingHearings = useMemo(
+  const totalExposure = useMemo(
     () =>
-      drtCases
-        .filter((c) => c.next_hearing_date)
-        .sort((a, b) =>
-          a.next_hearing_date!.localeCompare(b.next_hearing_date!),
-        )
-        .slice(0, 8),
-    [drtCases],
-  );
-
-  const oaCount = useMemo(
-    () => drtCases.filter((c) => c.case_type === "OA").length,
-    [drtCases],
-  );
-
-  const saCount = useMemo(
-    () => drtCases.filter((c) => c.case_type === "SA").length,
-    [drtCases],
+      bankCases.reduce(
+        (sum, c) => sum + (c.estimated_liability ?? 0),
+        0,
+      ),
+    [bankCases],
   );
 
   const kpis = [
     {
       label: "Total Cases",
-      value: counts.totalCases.toLocaleString("en-IN"),
+      value: (bankCases.length + drtProfiles.length).toLocaleString(),
       icon: FolderOpen,
     },
     {
       label: "Bank Ingestion Cases",
-      value: counts.bankCases.toLocaleString("en-IN"),
-      icon: Landmark,
+      value: bankCases.length.toLocaleString(),
+      icon: Bank,
     },
     {
       label: "DRT Ingestion Cases",
-      value: counts.drtProfiles.toLocaleString("en-IN"),
+      value: drtProfiles.length.toLocaleString(),
       icon: ShieldCheck,
     },
     {
-      label: "OA Proceedings",
-      value: oaCount.toLocaleString("en-IN"),
-      icon: Briefcase,
-    },
-    {
-      label: "SA Proceedings",
-      value: saCount.toLocaleString("en-IN"),
-      icon: Gavel,
+      label: "Live DRT Proceedings",
+      value: stats.total_cases.toLocaleString(),
+      icon: Scale,
     },
     {
       label: "Upcoming Hearings",
-      value: upcomingHearings.length.toString(),
+      value: hearings.length.toString(),
       icon: CalendarClock,
+    },
+    {
+      label: "Total Exposure",
+      value: formatCurrency(totalExposure),
+      icon: IndianRupee,
     },
   ];
 
@@ -117,14 +79,14 @@ function Dashboard() {
         description="Unified litigation intelligence across Bank SARFAESI and DRT proceedings."
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {kpis.map((kpi) => (
           <Card key={kpi.label}>
             <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
+              <CardTitle className="text-sm text-muted-foreground">
                 {kpi.label}
               </CardTitle>
-              <kpi.icon className="size-4 text-amber-600" />
+              <kpi.icon className="h-4 w-4 text-orange-600" />
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold">{kpi.value}</div>
@@ -132,38 +94,6 @@ function Dashboard() {
           </Card>
         ))}
       </div>
-
-      <Card className="mt-8">
-        <CardHeader>
-          <CardTitle>Upcoming DRT Hearings</CardTitle>
-        </CardHeader>
-        <CardContent className="divide-y p-0">
-          {upcomingHearings.length === 0 ? (
-            <p className="p-6 text-muted-foreground">
-              No hearings currently scheduled.
-            </p>
-          ) : (
-            upcomingHearings.map((c) => (
-              <Link
-                key={c.id}
-                to="/cases/$caseId"
-                params={{ caseId: c.id }}
-                className="flex items-center justify-between p-4 hover:bg-muted/50"
-              >
-                <div>
-                  <p className="font-medium">{c.title}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {c.case_reference} · {c.court_name}
-                  </p>
-                </div>
-                <div className="text-sm font-medium">
-                  {formatDate(c.next_hearing_date)}
-                </div>
-              </Link>
-            ))
-          )}
-        </CardContent>
-      </Card>
     </>
   );
 }
