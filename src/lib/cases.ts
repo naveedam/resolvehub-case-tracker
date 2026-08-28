@@ -63,9 +63,9 @@ async function fetchLegacyCases(): Promise<any[]> {
   return fetchAllRows<any>((from, to) =>
     supabase
       .from("cases")
-      .select("*")
-      .is("deleted_at", null)
-      .order("created_at", { ascending: false })
+      .select("id,title,estimated_liability,borrower_name,created_at")
+.is("deleted_at", null)
+.order("created_at", { ascending: false })
       .range(from, to),
   );
 }
@@ -74,7 +74,7 @@ async function fetchDrtProfiles(): Promise<any[]> {
   return fetchAllRows<any>((from, to) =>
     supabase
       .from("drt_profiles")
-      .select("id")
+      .select("id,case_id")
       .range(from, to),
   );
 }
