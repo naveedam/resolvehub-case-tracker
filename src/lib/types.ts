@@ -60,6 +60,7 @@ export interface Case {
   id: string;
   case_reference: string;
   title: string;
+  display_title: string | null;
   case_type: string | null;
   status: string | null;
   court_name: string | null;
@@ -134,13 +135,22 @@ export interface CasePartyWithParty extends CaseParty {
 export interface LiabilityWithLender extends Liability {
   lender: Party | null;
 }
-
+export interface DRTProfile {
+  tribunal: string | null;
+  diary_number: string | null;
+  filing_date: string | null;
+  applicant_advocate: string | null;
+  respondent_advocate: string | null;
+  current_status: string | null;
+  next_hearing_date: string | null;
+}
 export interface CaseDetail {
   case: Case;
   parties: CasePartyWithParty[];
   documents: CaseDocument[];
   liabilities: LiabilityWithLender[];
   assets: Asset[];
+  drt_profile: DRTProfile | null;
 }
 
 // --- Phase 1 Resolution Profile layer (additive tables — see
