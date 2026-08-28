@@ -102,13 +102,7 @@ function CasesPage() {
       return sortDesc ? -diff : diff;
     });
 }, [cases, search, caseType, status, ticketSize, sortDesc]);
-      )
-      .sort((a, b) => {
-        const diff = (a.estimated_liability ?? 0) - (b.estimated_liability ?? 0);
-        return sortDesc ? -diff : diff;
-      });
-  }, [cases, search, caseType, status, ticketSize, sortDesc]);
-
+ 
   return (
     <>
       <PageHeader
