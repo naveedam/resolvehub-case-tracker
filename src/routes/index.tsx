@@ -19,14 +19,6 @@ import {
   drtProfilesQueryOptions,
   formatCurrency,
 } from "@/lib/cases";
-import {
-  casesQueryOptions,
-  dashboardStatsQueryOptions,
-  upcomingHearingsQueryOptions,
-  legacyCasesQueryOptions,
-  drtProfilesQueryOptions,
-  formatCurrency,
-} from "@/lib/cases";
 export const Route = createFileRoute("/")({
   loader: ({ context }) => {
     return Promise.all([
