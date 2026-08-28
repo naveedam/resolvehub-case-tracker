@@ -1,68 +1,84 @@
 from __future__ import annotations
-"""
-ResolveHub - DRT-1 Bangalore parser (canonical reference implementation)
----------------------------------------------------------------------------
-Parses a DRT case-status HTML page (currently the local fixture in
-sample/) into a structured dict. Doesn't care whether the HTML came from
-a saved fixture or a live fetch - scraper.py owns that distinction.
-"""
 
+import plistlib
 import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 
-FIELD_KEY_MAP = {
-    "tribunal": "tribunal",
-    "case no.": "case_number",
-    "case no": "case_number",
-    "diary no.": "diary_number",
-    "diary no": "diary_number",
-    "case type": "case_type",
-    "date of filing": "filing_date_raw",
-    "applicant": "applicant",
-    "respondent": "respondent",
-    "applicant advocate": "applicant_advocate",
-    "respondent advocate": "respondent_advocate",
-    "status": "status",
-}
+
+def _clean(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
 
 
-def parse_case_html(html: str) -> dict:
-    """Returns a dict with normalized keys: tribunal, case_number,
-    diary_number, case_type, filing_date (ISO yyyy-mm-dd), applicant,
-    respondent, applicant_advocate, respondent_advocate, status."""
-    soup = BeautifulSoup(html, "html.parser")
-    fields = {}
+def _parse_date(value: str):
+    value = _clean(value)
+    if not value:
+        return None
 
-    for row in soup.select("table.case-info-table tr"):
-        label_cell = row.find("td", class_="label")
-        value_cell = row.find("td", class_="value")
-        if not label_cell or not value_cell:
-            continue
-        label = label_cell.get_text(strip=True).lower()
-        value = value_cell.get_text(strip=True)
-        key = FIELD_KEY_MAP.get(label)
-        if key:
-            fields[key] = value or None
-
-    filing_date_raw = fields.pop("filing_date_raw", None)
-    fields["filing_date"] = _parse_date(filing_date_raw) if filing_date_raw else None
-
-    # Empty strings (e.g. an unfilled Respondent Advocate cell) should be
-    # None, not "" - distinguishes "known to be blank" from "not present".
-    for k, v in fields.items():
-        if v == "":
-            fields[k] = None
-
-    return fields
-
-
-def _parse_date(raw: str) -> str | None:
-    """DRT portals typically show DD-MM-YYYY; normalize to ISO."""
-    raw = raw.strip()
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y"):
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
         try:
-            return datetime.strptime(raw, fmt).date().isoformat()
+            return datetime.strptime(value, fmt).date().isoformat()
         except ValueError:
+            pass
+
+    return value
+
+
+def load_webarchive(path: str) -> str:
+    """Extract rendered HTML from a Safari .webarchive."""
+    with open(path, "rb") as f:
+        archive = plistlib.load(f)
+
+    data = archive["WebMainResource"]["WebResourceData"]
+    return data.decode("utf-8", errors="ignore")
+
+
+def parse(path: str):
+    html = load_webarchive(path)
+    soup = BeautifulSoup(html, "html.parser")
+
+    tables = soup.find_all("table")
+    if not tables:
+        raise ValueError("No table found")
+
+    # Largest table is the Party-wise report
+    table = max(tables, key=lambda t: len(t.find_all("tr")))
+    rows = table.find_all("tr")
+
+    headers = [_clean(th.get_text()).lower() for th in rows[0].find_all(["th", "td"])]
+
+    cases = []
+
+    for tr in rows[1:]:
+        cols = [_clean(td.get_text()) for td in tr.find_all("td")]
+
+        if len(cols) < len(headers):
             continue
-    return None
+
+        row = dict(zip(headers, cols))
+
+        applicant = ""
+        respondent = ""
+
+        party_text = row.get("applicant vs respondent", "")
+        if " vs " in party_text.lower():
+            parts = re.split(r"\bvs\b", party_text, flags=re.IGNORECASE)
+            applicant = _clean(parts[0])
+            respondent = _clean(parts[1])
+
+        cases.append(
+            {
+                "tribunal": "Debts Recovery Tribunal - Bangalore (DRT-1)",
+                "case_number": row.get("case no.") or row.get("case no"),
+                "case_type": row.get("case type"),
+                "diary_number": row.get("diary no.") or row.get("diary no"),
+                "filing_date": _parse_date(row.get("date of filing")),
+                "applicant": applicant,
+                "respondent": respondent,
+                "applicant_advocate": row.get("applicant's advocate"),
+                "respondent_advocate": row.get("respondent's advocate") or None,
+                "status": "pending",
+            }
+        )
+
+    return cases
