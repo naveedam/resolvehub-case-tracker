@@ -62,8 +62,9 @@ async function fetchCases(): Promise<CaseListRow[]> {
 async function fetchLegacyCases(): Promise<any[]> {
   return fetchAllRows<any>((from, to) =>
     supabase
-      .from("legacy_cases")
+      .from("cases")
       .select("*")
+      .is("deleted_at", null)
       .order("created_at", { ascending: false })
       .range(from, to),
   );
