@@ -21,7 +21,23 @@ import {
 } from "@/lib/cases";
 
 export const Route = createFileRoute("/")({
+  loader: ({ context }) => {
+    return Promise.all([
+      context.queryClient.ensureQueryData(dashboardStatsQueryOptions()),
+      context.queryClient.ensureQueryData(upcomingHearingsQueryOptions()),
+      context.queryClient.ensureQueryData(legacyCasesQueryOptions()),
+      context.queryClient.ensureQueryData(drtProfilesQueryOptions()),
+    ]);
+  },
   component: Dashboard,
+  errorComponent: ({ error }) => (
+    <div className="p-8 text-red-600">
+      <h2 className="text-lg font-bold">Dashboard Error</h2>
+      <pre className="mt-2 text-xs whitespace-pre-wrap">
+        {String(error.message)}
+      </pre>
+    </div>
+  ),
 });
 
 function Dashboard() {
