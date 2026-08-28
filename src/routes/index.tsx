@@ -40,10 +40,10 @@ export const Route = createFileRoute("/")({
 });
 
 function Dashboard() {
-  const { data: drtCases } = useSuspenseQuery(casesQueryOptions());
-  const { data: hearings } = useSuspenseQuery(upcomingHearingsQueryOptions());
-  const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
-  const { data: drtProfiles } = useSuspenseQuery(drtProfilesQueryOptions());
+ const { data: stats } = useSuspenseQuery(dashboardStatsQueryOptions());
+const { data: hearings } = useSuspenseQuery(upcomingHearingsQueryOptions());
+const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
+const { data: drtProfiles } = useSuspenseQuery(drtProfilesQueryOptions());
 
   const totalExposure = useMemo(
     () =>
