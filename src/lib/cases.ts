@@ -34,24 +34,31 @@ async function fetchAllRows<T>(
 }
 
 async function fetchCases(): Promise<CaseListRow[]> {
-  const cases = await fetchAllRows<CaseListRow>((from, to) =>
+  const rows = await fetchAllRows<any>((from, to) =>
     supabase
-      .from("cases")
+      .from("v_drt_cases")
       .select("*")
-      .is("deleted_at", null)
-      .order("id", { ascending: true }) // stable order required for .range() to page correctly
+      .order("filing_date", { ascending: false })
       .range(from, to),
   );
-  if (cases.length === 0) return [];
 
-  const links = await fetchAllRows<any>((from, to) =>
-    supabase
-      .from("case_parties")
-      .select("case_id, parties(full_name)")
-      .eq("role", "Borrower")
-      .order("id", { ascending: true })
-      .range(from, to),
-  );
+  return rows.map((r) => ({
+    id: r.id,
+    case_reference: r.case_reference,
+    title: r.display_title,
+    display_title: r.display_title,
+    case_number: r.case_number,
+    case_type: r.case_type,
+    court_name: r.court_name,
+    borrower_name: null,
+    status: r.current_status,
+    next_hearing_date: r.next_hearing_date,
+    estimated_liability: null,
+    created_at: r.filing_date,
+    filing_date: r.filing_date,
+    diary_number: r.diary_number,
+  }));
+}
 
   const borrowerByCase = new Map(links.map((l) => [l.case_id, l.parties?.full_name ?? null]));
 
