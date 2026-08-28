@@ -137,10 +137,15 @@ def ingest(fields: dict, tribunal_short: str = "BLR1"):
 
 
 def run():
-    html = scraper.fetch_local_html("SA-382-2025.html")
-    fields = drt_parser.parse_case_html(html)
-    print(f"Parsed fields: {fields}")
-    ingest(fields)
+    html_path = "sample/DRT1-PartyWise-MNAssociates.webarchive"
+
+    cases = drt_parser.parse(html_path)
+
+    print(f"Parsed {len(cases)} cases\n")
+
+    for case in cases:
+        ingest(case)
+
     print("\nDone.")
 
 
