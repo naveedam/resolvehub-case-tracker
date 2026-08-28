@@ -13,10 +13,12 @@ import {
 import { PageHeader } from "@/components/AppShell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  import {
   dashboardStatsQueryOptions,
   upcomingHearingsQueryOptions,
   legacyCasesQueryOptions,
   drtProfilesQueryOptions,
+  casesQueryOptions,
   formatCurrency,
 } from "@/lib/cases";
 export const Route = createFileRoute("/")({
@@ -26,6 +28,7 @@ export const Route = createFileRoute("/")({
     context.queryClient.ensureQueryData(upcomingHearingsQueryOptions()),
     context.queryClient.ensureQueryData(legacyCasesQueryOptions()),
     context.queryClient.ensureQueryData(drtProfilesQueryOptions()),
+    context.queryClient.ensureQueryData(casesQueryOptions()),
   ]);
 },
   component: Dashboard,
@@ -44,6 +47,7 @@ function Dashboard() {
 const { data: hearings } = useSuspenseQuery(upcomingHearingsQueryOptions());
 const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
 const { data: drtProfiles } = useSuspenseQuery(drtProfilesQueryOptions());
+  const { data: drtCases } = useSuspenseQuery(casesQueryOptions());
 
   const totalExposure = useMemo(
     () =>
@@ -72,7 +76,7 @@ const { data: drtProfiles } = useSuspenseQuery(drtProfilesQueryOptions());
     },
         {
       label: "Live DRT Proceedings",
-      value: stats.total_cases.toLocaleString(),
+      value: drtCases.length.toLocaleString(),
       icon: Scale,
     },
     {
