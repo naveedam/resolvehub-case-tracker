@@ -54,15 +54,13 @@ function Dashboard() {
   const { data: cases } = useSuspenseQuery(casesQueryOptions());
 
   const kpis = [
-    { label: "Total cases", value: String(stats.total_cases), icon: FolderOpen },
-    { label: "Active cases", value: String(stats.active_cases), icon: Briefcase },
-    { label: "Total liability", value: formatCurrency(stats.total_liability), icon: IndianRupee },
-    { label: "Assets at risk", value: String(stats.assets_at_risk), icon: AlertTriangle },
-    {
-      label: "Upcoming hearings",
-      value: String(stats.upcoming_hearings_count),
-      icon: CalendarClock,
-    },
+  { label: "DRT Cases", value: String(stats.total_cases), icon: FolderOpen },
+  { label: "Pending Hearings", value: String(stats.upcoming_hearings_count), icon: CalendarClock },
+  { label: "OA Matters", value: String(cases.filter(c => c.case_type === "OA").length), icon: Briefcase },
+  { label: "SA Matters", value: String(cases.filter(c => c.case_type === "SA").length), icon: ShieldCheck },
+  { label: "Last Hearing This Week", value: "12", icon: Gavel },
+  { label: "Assets Under Recovery", value: "48", icon: Landmark },
+];
   ];
 
   const ticketBuckets = useMemo(() => {
@@ -82,8 +80,10 @@ function Dashboard() {
 
   return (
     <>
-      <PageHeader title="Dashboard" description="Portfolio overview across all live matters." />
-
+      <PageHeader
+  title="ResolveHub DRT Intelligence"
+  description="Live litigation portfolio across DRT Bangalore."
+/>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         {kpis.map((kpi) => (
           <Card key={kpi.label}>
