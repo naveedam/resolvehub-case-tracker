@@ -61,7 +61,7 @@ function Dashboard() {
   { label: "Last Hearing This Week", value: "12", icon: Gavel },
   { label: "Assets Under Recovery", value: "48", icon: Landmark },
 ];
-  ];
+
 
   const ticketBuckets = useMemo(() => {
     const buckets: Record<TicketSize, { count: number; total: number }> = {
