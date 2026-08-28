@@ -70,12 +70,10 @@ function Dashboard() {
       value: drtProfiles.length.toLocaleString(),
       icon: ShieldCheck,
     },
-    {
-      {
-  label: "Live DRT Proceedings",
-  value: drtCases.length.toLocaleString(),
-  icon: Scale,
-},
+        {
+      label: "Live DRT Proceedings",
+      value: stats.total_cases.toLocaleString(),
+      icon: Scale,
     },
     {
       label: "Upcoming Hearings",
