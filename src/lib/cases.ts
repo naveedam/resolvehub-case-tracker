@@ -137,7 +137,7 @@ async function fetchUpcomingHearings(): Promise<CaseListRow[]> {
 export const casesQueryOptions = () =>
   queryOptions({
     queryKey: ["cases"],
-    queryFn: fetchCases,
+    queryFn: fetchDrtProfiles,
   });
 
 export const legacyCasesQueryOptions = () =>
