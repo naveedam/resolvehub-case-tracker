@@ -37,16 +37,19 @@ function CasesPage() {
   const [search, setSearch] = useState("");
 
   const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
-  const { data: drtCases } = useSuspenseQuery(casesQueryOptions());
   const bankRows = useMemo(() => {
-    const term = search.toLowerCase();
-    return bankCases.filter(
-      (c: any) =>
-        c.title?.toLowerCase().includes(term) ||
-        c.borrower_name?.toLowerCase().includes(term),
-    );
-  }, [bankCases, search]);
+  const term = search.toLowerCase()
 
+  return bankCases.filter((c: any) => {
+    const isBankCase = c.case_type === "SARFAESI"
+
+    const matches =
+      c.title?.toLowerCase().includes(term) ||
+      c.borrower_name?.toLowerCase().includes(term)
+
+    return isBankCase && matches
+  })
+}, [bankCases, search])
   const drtRows = useMemo(() => {
     const term = search.toLowerCase();
     return drtCases.filter(
