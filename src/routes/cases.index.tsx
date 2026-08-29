@@ -46,8 +46,7 @@ function CasesPage() {
     const matches =
       c.title?.toLowerCase().includes(term) ||
       c.borrower_name?.toLowerCase().includes(term)
-
-    return isBankCase && matches
+      return isBankCase && matches
   })
 }, [bankCases, search])
   const drtRows = useMemo(() => {
