@@ -37,7 +37,7 @@ function CasesPage() {
   const [search, setSearch] = useState("");
 
   const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
-  const { data: drtCases } = useSuspenseQuery(drtProfilesQueryOptions());;
+  const { data: drtCases } = useSuspenseQuery(casesQueryOptions());
   const bankRows = useMemo(() => {
     const term = search.toLowerCase();
     return bankCases.filter(
