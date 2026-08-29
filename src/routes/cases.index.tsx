@@ -38,31 +38,30 @@ function CasesPage() {
 
   const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
   const { data: drtCases } = useSuspenseQuery(casesQueryOptions());
-  
+
   const bankRows = useMemo(() => {
-  const term = search.toLowerCase()
+    const term = search.toLowerCase();
 
-  return bankCases.filter((c: any) => {
-    const isBankCase = c.case_type === "SARFAESI"
-const matches =
-      c.title?.toLowerCase().includes(term) ||
-      c.borrower_name?.toLowerCase().includes(term)
-      return isBankCase && matches
-  })
-}, [bankCases, search])
+    return bankCases.filter((c: any) => {
+      const matches =
+        c.title?.toLowerCase().includes(term) ||
+        c.borrower_name?.toLowerCase().includes(term);
+
+      return c.case_type === "SARFAESI" && matches;
+    });
+  }, [bankCases, search]);
+
   const drtRows = useMemo(() => {
-  const term = search.toLowerCase();
+    const term = search.toLowerCase();
 
-  return drtCases.filter((c: any) => {
-    const isDrtCase = c.case_type !== "SARFAESI";
+    return drtCases.filter((c: any) => {
+      const matches =
+        c.title?.toLowerCase().includes(term) ||
+        c.case_reference?.toLowerCase().includes(term);
 
-    const matches =
-      c.title?.toLowerCase().includes(term) ||
-      c.case_reference?.toLowerCase().includes(term);
-
-    return isDrtCase && matches;
-  });
-}, [drtCases, search]);
+      return c.case_type !== "SARFAESI" && matches;
+    });
+  }, [drtCases, search]);
 
   return (
     <>
@@ -142,22 +141,25 @@ const matches =
                       </Link>
                     </TableCell>
 
+                    <TableCell className="text-right">
+                      {formatCurrency(c.estimated_liability)}
+                    </TableCell>
+                  </TableRow>
+                ))
+              : drtRows.map((c: any) => (
+                  <TableRow key={c.id}>
                     <TableCell className="font-medium">
-  <Link
-    to="/cases/$caseId"
-    params={{ caseId: c.id }}
-    className="hover:underline"
-  >
-    {c.title}
-  </Link>
-</TableCell>
-
-                    <TableCell>{c.case_type}</TableCell>
-
-                    <TableCell>
-                      {formatDate(c.next_hearing_date)}
+                      <Link
+                        to="/cases/$caseId"
+                        params={{ caseId: c.id }}
+                        className="hover:underline"
+                      >
+                        {c.title}
+                      </Link>
                     </TableCell>
 
+                    <TableCell>{c.case_type}</TableCell>
+                    <TableCell>{formatDate(c.next_hearing_date)}</TableCell>
                     <TableCell>{c.status}</TableCell>
                   </TableRow>
                 ))}
