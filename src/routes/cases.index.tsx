@@ -37,26 +37,32 @@ function CasesPage() {
   const [search, setSearch] = useState("");
 
   const { data: bankCases } = useSuspenseQuery(legacyCasesQueryOptions());
+  const { data: drtCases } = useSuspenseQuery(casesQueryOptions());
+  
   const bankRows = useMemo(() => {
   const term = search.toLowerCase()
 
   return bankCases.filter((c: any) => {
     const isBankCase = c.case_type === "SARFAESI"
-
-    const matches =
+const matches =
       c.title?.toLowerCase().includes(term) ||
       c.borrower_name?.toLowerCase().includes(term)
       return isBankCase && matches
   })
 }, [bankCases, search])
   const drtRows = useMemo(() => {
-    const term = search.toLowerCase();
-    return drtCases.filter(
-      (c: any) =>
-        c.title?.toLowerCase().includes(term) ||
-        c.case_reference?.toLowerCase().includes(term),
-    );
-  }, [drtCases, search]);
+  const term = search.toLowerCase();
+
+  return drtCases.filter((c: any) => {
+    const isDrtCase = c.case_type !== "SARFAESI";
+
+    const matches =
+      c.title?.toLowerCase().includes(term) ||
+      c.case_reference?.toLowerCase().includes(term);
+
+    return isDrtCase && matches;
+  });
+}, [drtCases, search]);
 
   return (
     <>
@@ -74,14 +80,14 @@ function CasesPage() {
           variant={view === "bank" ? "default" : "outline"}
           onClick={() => setView("bank")}
         >
-          Bank Cases (35,270)
+          Bank Cases ({bankRows.length.toLocaleString()})
         </Button>
 
         <Button
           variant={view === "drt" ? "default" : "outline"}
           onClick={() => setView("drt")}
         >
-          DRT Proceedings (945)
+          DRT Proceedings ({drtRows.length.toLocaleString()})
         </Button>
       </div>
 
@@ -136,16 +142,15 @@ function CasesPage() {
                       </Link>
                     </TableCell>
 
-                    <TableCell className="text-right">
-                      {formatCurrency(c.estimated_liability)}
-                    </TableCell>
-                  </TableRow>
-                ))
-              : drtRows.map((c: any) => (
-                  <TableRow key={c.id}>
                     <TableCell className="font-medium">
-                      {c.title}
-                    </TableCell>
+  <Link
+    to="/cases/$caseId"
+    params={{ caseId: c.id }}
+    className="hover:underline"
+  >
+    {c.title}
+  </Link>
+</TableCell>
 
                     <TableCell>{c.case_type}</TableCell>
 
