@@ -65,6 +65,7 @@ async function fetchLegacyCases(): Promise<any[]> {
       .from("cases")
       .select("*")
       .is("deleted_at", null)
+      .eq("case_type", "SARFAESI")
       .order("created_at", { ascending: false })
       .range(from, to),
   );
