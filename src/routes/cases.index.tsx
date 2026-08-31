@@ -44,8 +44,8 @@ function CasesPage() {
 
     return bankCases.filter((c: any) => {
       const matches =
-        c.title?.toLowerCase().includes(term) ||
-        c.borrower_name?.toLowerCase().includes(term);
+        c.borrower_name?.toLowerCase().includes(term) ||
+        c.lender_name?.toLowerCase().includes(term);
 
       return c.case_type === "SARFAESI" && matches;
     });
@@ -56,7 +56,8 @@ function CasesPage() {
 
     return drtCases.filter((c: any) => {
       const matches =
-        c.title?.toLowerCase().includes(term) ||
+        c.borrower_name?.toLowerCase().includes(term) ||
+        c.lender_name?.toLowerCase().includes(term) ||
         c.case_reference?.toLowerCase().includes(term);
 
       return c.case_type !== "SARFAESI" && matches;
@@ -110,12 +111,13 @@ function CasesPage() {
             {view === "bank" ? (
               <TableRow>
                 <TableHead>Borrower</TableHead>
-                <TableHead>Case Title</TableHead>
+                <TableHead>Bank</TableHead>
                 <TableHead className="text-right">Liability</TableHead>
               </TableRow>
             ) : (
               <TableRow>
-                <TableHead>Case</TableHead>
+                <TableHead>Borrower</TableHead>
+                <TableHead>Bank</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Next Hearing</TableHead>
                 <TableHead>Status</TableHead>
@@ -128,18 +130,16 @@ function CasesPage() {
               ? bankRows.map((c: any) => (
                   <TableRow key={c.id}>
                     <TableCell className="font-medium">
-                      {c.borrower_name ?? "—"}
-                    </TableCell>
-
-                    <TableCell>
                       <Link
                         to="/cases/$caseId"
                         params={{ caseId: c.id }}
                         className="hover:underline"
                       >
-                        {c.title}
+                        {c.borrower_name ?? "—"}
                       </Link>
                     </TableCell>
+
+                    <TableCell>{c.lender_name ?? "—"}</TableCell>
 
                     <TableCell className="text-right">
                       {formatCurrency(c.estimated_liability)}
@@ -154,10 +154,11 @@ function CasesPage() {
                         params={{ caseId: c.id }}
                         className="hover:underline"
                       >
-                        {c.title}
+                        {c.borrower_name ?? "—"}
                       </Link>
                     </TableCell>
 
+                    <TableCell>{c.lender_name ?? "—"}</TableCell>
                     <TableCell>{c.case_type}</TableCell>
                     <TableCell>{formatDate(c.next_hearing_date)}</TableCell>
                     <TableCell>{c.status}</TableCell>

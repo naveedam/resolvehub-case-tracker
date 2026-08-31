@@ -31,44 +31,85 @@ async function fetchAllRows<T>(
 
 // ---------------- DRT PROCEEDINGS ----------------
 
-async function fetchCases(): Promise<CaseListRow[]> {
+async function fetchCaseDisplayMap(): Promise<
+  Map<string, { borrower_names: string | null; lender_name: string | null; guarantor_names: string | null }>
+> {
   const rows = await fetchAllRows<any>((from, to) =>
     supabase
-      .from("v_drt_cases")
-      .select("*")
-      .order("filing_date", { ascending: false })
+      .from("v_case_display")
+      .select("id, borrower_names, lender_name, guarantor_names")
       .range(from, to),
   );
 
-  return rows.map((r) => ({
-    id: r.id,
-    case_reference: r.case_reference,
-    title: r.display_title,
-    display_title: r.display_title,
-    case_type: r.case_type,
-    court_name: r.court_name,
-    borrower_name: null,
-    status: r.current_status,
-    next_hearing_date: r.next_hearing_date,
-    estimated_liability: null,
-    filing_date: r.filing_date,
-    summary: null,
-    deleted_at: null,
-  }));
+  return new Map(
+    rows.map((r) => [
+      r.id,
+      {
+        borrower_names: r.borrower_names,
+        lender_name: r.lender_name,
+        guarantor_names: r.guarantor_names,
+      },
+    ]),
+  );
+}
+
+async function fetchCases(): Promise<CaseListRow[]> {
+  const [rows, displayMap] = await Promise.all([
+    fetchAllRows<any>((from, to) =>
+      supabase
+        .from("v_drt_cases")
+        .select("*")
+        .order("filing_date", { ascending: false })
+        .range(from, to),
+    ),
+    fetchCaseDisplayMap(),
+  ]);
+
+  return rows.map((r) => {
+    const display = displayMap.get(r.id);
+    return {
+      id: r.id,
+      case_reference: r.case_reference,
+      title: r.display_title,
+      display_title: r.display_title,
+      case_type: r.case_type,
+      court_name: r.court_name,
+      borrower_name: display?.borrower_names ?? null,
+      lender_name: display?.lender_name ?? null,
+      status: r.current_status,
+      next_hearing_date: r.next_hearing_date,
+      estimated_liability: null,
+      filing_date: r.filing_date,
+      summary: null,
+      deleted_at: null,
+    };
+  });
 }
 
 // ---------------- BANK CASES ----------------
 
 async function fetchLegacyCases(): Promise<any[]> {
-  return fetchAllRows<any>((from, to) =>
-    supabase
-      .from("cases")
-      .select("*")
-      .is("deleted_at", null)
-      .eq("case_type", "SARFAESI")
-      .order("created_at", { ascending: false })
-      .range(from, to),
-  );
+  const [rows, displayMap] = await Promise.all([
+    fetchAllRows<any>((from, to) =>
+      supabase
+        .from("cases")
+        .select("*")
+        .is("deleted_at", null)
+        .eq("case_type", "SARFAESI")
+        .order("created_at", { ascending: false })
+        .range(from, to),
+    ),
+    fetchCaseDisplayMap(),
+  ]);
+
+  return rows.map((r) => {
+    const display = displayMap.get(r.id);
+    return {
+      ...r,
+      borrower_name: display?.borrower_names ?? null,
+      lender_name: display?.lender_name ?? null,
+    };
+  });
 }
 
 async function fetchDrtProfiles(): Promise<any[]> {

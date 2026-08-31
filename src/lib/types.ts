@@ -126,6 +126,7 @@ export interface DashboardStats {
 /** A case row enriched with the party linked via role = 'Borrower'. */
 export interface CaseListRow extends Case {
   borrower_name: string | null;
+  lender_name: string | null;
 }
 
 export interface CasePartyWithParty extends CaseParty {
