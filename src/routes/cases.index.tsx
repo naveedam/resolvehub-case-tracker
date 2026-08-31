@@ -106,7 +106,7 @@ function CasesPage() {
       </div>
 
       <Card className="overflow-hidden">
-        <Table>
+        <Table key={view}>
           <TableHeader>
             {view === "bank" ? (
               <TableRow>
