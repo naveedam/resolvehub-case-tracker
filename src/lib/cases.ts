@@ -102,6 +102,9 @@ async function fetchLegacyCases(): Promise<any[]> {
     fetchCaseDisplayMap(),
   ]);
 
+  const badRows = rows.filter((r) => r.case_type !== "SARFAESI");
+  console.log("[DEBUG] fetchLegacyCases total:", rows.length, "non-SARFAESI rows:", badRows.length, badRows);
+
   return rows.map((r) => {
     const display = displayMap.get(r.id);
     return {
